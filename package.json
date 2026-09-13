@@ -1,0 +1,84 @@
+{
+  "name": "zombie-survival",
+  "version": "0.1.0",
+  "description": "First-person 3D forest zombie survival game (Electron + Three.js + Rapier)",
+  "main": "dist-electron/main.cjs",
+  "author": "fawzaan",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "dev": "cross-env NODE_ENV=development concurrently -k -n VITE,ELECTRON -c cyan,magenta \"npm:dev:vite\" \"npm:dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "npm run build:electron && wait-on tcp:5273 && cross-env NODE_ENV=development electron .",
+    "build:renderer": "vite build",
+    "build:electron": "node tools/build-electron.mjs",
+    "build": "npm run build:electron && npm run build:renderer",
+    "start": "npm run build && cross-env NODE_ENV=production electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "npm run build && electron-builder --win --dir",
+    "installer": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win",
+    "test:unit": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "node tools/integration/run.mjs",
+    "test:all": "npm run test:unit && npm run build && npm run test:integration",
+    "screenshots": "node tools/integration/run.mjs screenshots"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.14.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.169.0",
+    "@vitejs/plugin-react": "^4.3.3",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.5",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.zombiesurvival.game",
+    "productName": "Zombie Survival",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
