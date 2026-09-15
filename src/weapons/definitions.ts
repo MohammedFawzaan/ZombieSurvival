@@ -1,9 +1,10 @@
-import type { AmmoType, WeaponId } from '../state/types';
+import type { AmmoType, WeaponClass, WeaponId } from '../state/types';
 
 export interface WeaponDef {
   id: WeaponId;
   name: string;
   ammo: AmmoType;
+  kind: WeaponClass;
 
   damage: number;
 
@@ -35,6 +36,17 @@ export interface WeaponDef {
 
   noiseRadius: number;
   penetration: number;
+
+  pellets?: number;
+  pelletCone?: number;
+  pelletConeAim?: number;
+
+  meleeWindup?: number;
+  meleeActive?: number;
+  meleeRecovery?: number;
+  meleeArc?: number;
+  meleeStamina?: number;
+  meleeStagger?: number;
 }
 
 export const WEAPONS: Record<WeaponId, WeaponDef> = {
@@ -42,6 +54,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     id: 'pistol',
     name: 'M9 Pistol',
     ammo: '9mm',
+    kind: 'hitscan',
     damage: 34,
     rpm: 300,
     automatic: false,
@@ -69,6 +82,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     id: 'rifle',
     name: 'AR-15 Rifle',
     ammo: '556',
+    kind: 'hitscan',
     damage: 27,
     rpm: 720,
     automatic: true,
@@ -92,9 +106,82 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     noiseRadius: 95,
     penetration: 2,
   },
+  shotgun: {
+    id: 'shotgun',
+    name: 'M590 Shotgun',
+    ammo: '12g',
+    kind: 'pellet',
+    damage: 13,
+    rpm: 75,
+    automatic: false,
+    magazineSize: 6,
+    startingReserve: 24,
+    maxReserve: 60,
+    reloadTime: 3.1,
+    range: 60,
+    falloffStart: 9,
+    falloffMin: 0.22,
+    spreadHip: 0.012,
+    spreadAim: 0.006,
+    spreadPerShot: 0.01,
+    spreadRecovery: 0.09,
+    spreadMax: 0.05,
+    recoilPitch: 0.052,
+    recoilYaw: 0.011,
+    recoilRecovery: 7,
+    kickBack: 0.12,
+    muzzleFlashScale: 1.6,
+    noiseRadius: 135,
+    penetration: 1,
+    pellets: 9,
+    pelletCone: 0.085,
+    pelletConeAim: 0.62,
+  },
+  machete: {
+    id: 'machete',
+    name: 'Machete',
+    ammo: 'none',
+    kind: 'melee',
+    damage: 58,
+    rpm: 80,
+    automatic: true,
+    magazineSize: 0,
+    startingReserve: 0,
+    maxReserve: 0,
+    reloadTime: 0,
+    range: 2.3,
+    falloffStart: 2.3,
+    falloffMin: 1,
+    spreadHip: 0,
+    spreadAim: 0,
+    spreadPerShot: 0,
+    spreadRecovery: 0,
+    spreadMax: 0,
+    recoilPitch: 0.006,
+    recoilYaw: 0.003,
+    recoilRecovery: 12,
+    kickBack: 0.06,
+    muzzleFlashScale: 0,
+    noiseRadius: 14,
+    penetration: 1,
+    meleeWindup: 0.12,
+    meleeActive: 0.1,
+    meleeRecovery: 0.36,
+    meleeArc: 0.45,
+    meleeStamina: 9,
+    meleeStagger: 0.75,
+  },
 };
 
-export const WEAPON_ORDER: readonly WeaponId[] = ['pistol', 'rifle'];
+export const WEAPON_ORDER: readonly WeaponId[] = ['pistol', 'rifle', 'shotgun', 'machete'];
+
+export function usesAmmo(def: WeaponDef): boolean {
+  return def.ammo !== 'none' && def.magazineSize > 0;
+}
+
+export function meleeSwingDuration(def: WeaponDef): number {
+  return (def.meleeWindup ?? 0) + (def.meleeActive ?? 0) + (def.meleeRecovery ?? 0);
+}
 
 export const REGION_MULTIPLIER = {
   head: 3.4,

@@ -11,7 +11,7 @@ export const GROUP = {
   ZOMBIE: 0x0008,
 } as const;
 
-function groups(member: number, filter: number): number {
+export function groups(member: number, filter: number): number {
   return (member << 16) | filter;
 }
 

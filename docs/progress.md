@@ -623,3 +623,193 @@ A 7x reduction in visible vegetation churn.
   released on death, camera drops 1.36 m, restart returns to full health.
 - `flicker` PASS: 0 visibility toggles over 360 frames.
 - `pacing` PASS with the new vegetation-coherence check.
+
+---
+
+## Flicker cause #6: stale interpolation origin + LOD threshold oscillation (2026-09-14)
+
+The five previously-fixed causes were all real, but one remained, and the
+`flicker` suite could not see it: it only sampled `root.visible` booleans. This
+bug never changes visibility. The rig stays visible and is drawn in the wrong
+place, so the suite reported **0 toggles** while zombies visibly strobed.
+
+### Cause A — `prevRender*` was never advanced in the live path
+
+In `ZombieManager.step()` the live branch overwrote `currRender*` each step but
+never copied the old value into `prevRender*`. Only the corpse branch did that.
+`prevRender*` was therefore written exactly once, under `if (!z.renderInit)` on
+the zombie's first step, and then held that spawn position forever.
+
+The renderer computes `prev + (curr - prev) * blend`. At LOD 0,
+`renderBlendRate = 60` so `blend` saturates to 1 within one frame and the stale
+origin is masked — which is why this survived every close-range test. At LOD 1
+the rate is `1/(3*dt) = 20`, so `blend` sits at 0.33/0.66 and the rig is drawn a
+third of the way back toward a position that may be tens of metres away.
+
+### Cause B — no hysteresis on `NEAR_DIST` / `MID_DIST`
+
+A chasing zombie matches the player's speed, so it parks almost exactly on the
+34 m boundary for hundreds of frames. With hard thresholds it flipped tier
+**every single frame**, alternating `renderBlendRate` between 60 and 20 and thus
+alternating between the correct position and the stale one.
+
+Measured, zombie 1 pacing the player at 33.9-34.0 m:
+
+```
+f406 lod=0 render=(17.5868,-7.1774)  stepMove= 0.058   body=(17.5868,-7.1774)
+f408 lod=1 render=(30.4320,10.2144)  stepMove=21.662   body=(17.6068,-7.2924)
+f409 lod=0 render=(17.7177,-7.3585)  stepMove=21.690   body=(16.6410,-7.4640)
+f410 lod=1 render=(30.4084,10.0855)  stepMove=21.572   body=(17.6511,-7.5215)
+```
+
+A ~21 m teleport and back, every frame, with `root.visible` constant.
+
+### Fixes
+
+- Advance `prevRender* = currRender*` before writing the new transform, so
+  interpolation always runs between two consecutive transforms.
+- `LOD_HYSTERESIS = 3` m: promote on the plain threshold, demote only past the
+  band, so a zombie pacing the player keeps its tier.
+
+`src/zombies/zombieManager.ts`
+
+### Measured (420 frames, sprinting, ~21 zombies)
+
+| | render pos >1 m off body | worst | LOD flips |
+|---|---|---|---|
+| Before | 57.9% of samples | 21.7 m | 34 (21 on one zombie) |
+| After | **0.20%** | **0.19 m** | **10** |
+
+Residual >1 m samples are respawn slots whose `renderInit` is false; the
+renderer forces alpha=1 in that case, so they are never drawn from the stale
+pair.
+
+### Suite improvement
+
+`flicker` now also reconstructs the interpolated render transform, compares it
+against the authoritative body position, and counts LOD tier flips. Validated
+to FAIL before the fix (62.82% detached, worst 11.65 m) and PASS after (0.00%,
+worst 0.19 m) — with `visibilityToggles: 0` in **both** runs, confirming the
+old assertion was structurally blind to this class of bug.
+
+Suites passing: `flicker`, `collision`, `melee`, `obstacles`, `pacing`.
+
+---
+
+## V1 build-out (2026-09-14)
+
+Work delivered on top of the prototype, verified against real Electron builds.
+
+### Zombie visual overhaul
+
+The prototype zombie was a stack of boxes and cylinders built procedurally in
+Three.js; `assets/models/zombie_base.glb` existed but was never loaded. V1
+replaces both halves of that.
+
+`tools/blender/export_assets.py` now authors three variants — walker, runner and
+brute — using real mesh operations rather than stacked primitives, and exports
+them with named animation clips (idle, walk, chase, attack, stagger, hit,
+death). `src/render/zombieAssets.ts` loads them through `GLTFLoader`;
+`ZombieRenderer.enableSkinned()` gates on a successful load, and the procedural
+rig is retained as a fallback rather than deleted.
+
+Measured in a running build via the new `zombieart` suite:
+
+| | value |
+|---|---|
+| geometry source | `glb-skinned` (GLB path live, not the fallback) |
+| visible rigs | 22 |
+| draw calls | 3 / rig |
+| triangles | 6,437 / rig |
+| frozen animation samples over 180 frames | 0 |
+| clip transitions observed | 16 |
+
+The "frozen animation samples" check exists because cause #6 (stale
+interpolation origin) had an obvious analogue in animation space: a clip time or
+blend weight that only advances on a zombie's LOD tick would freeze and jump the
+same way. It does not.
+
+### Weapons: shotgun, melee, and the muzzle-space bug
+
+Shotgun fires 9 pellets per shell, each its own hitscan with its own hit region
+and falloff. Damage accumulates per zombie across the volley and is applied in a
+single `applyDamage` call, so nine pellets into one target is one kill and one
+hit marker rather than nine overlapping stagger rolls; a pellet stops at its
+first zombie so it can never be counted twice.
+
+Pellet spread (`src/weapons/pellets.ts`) uses `radius = sqrt(u)` for
+area-uniformity, then stratifies: pellet *i* is confined to angular wedge *i*
+and radial ring *i*, jittered within its cell. At 9 samples plain uniform
+sampling visibly clumps; stratification guarantees a usable pattern every shell.
+Verified numerically — mean radius converges to the analytic 2/3 within 0.03,
+inner/outer halves split 45-55% by area, and all four quadrants are occupied on
+every one of 500 shots.
+
+Melee (machete) resolves inside a 0.10 s active window after a 0.12 s windup,
+using a 7-sample swept arc rather than a single ray, and damages only the
+nearest zombie in the arc. It can stagger a zombie that is already attacking,
+which is what makes it usable as a panic button.
+
+**A real bug found while building the viewmodels:** `getMuzzleWorldPosition()`
+never returned a world position. The viewmodel renders in its own scene whose
+camera never leaves the origin, so the value was camera-*local* — measured
+`(0.249, -0.154, -0.940)` while the camera sat at `(-16.70, 3.80, -9.46)`. It
+was passed straight to `effects.spawnTracer`, which places tracers in the world
+scene, so every tracer originated near the map origin. Nearly invisible with a
+single hitscan tracer; with the shotgun it would have been nine wrong streaks
+per shot. Renamed to `getMuzzleViewPosition` (honest about its space) and the
+call site now applies the simulation-authoritative pitch/yaw/eye, so it does not
+depend on render state or a possibly-stale camera matrix. After the fix, with
+the player at `(3.8, 1.0, 12.6)`, all nine pellet tracer origins are at
+`(2.8, 1.7, 12.9)` — at the barrel.
+
+### Medical and the interruption rule
+
+Bandage heals 25 over 2.4 s and is **not** interruptible by damage; medkit heals
+65 over 5.5 s and **is** aborted by damage, with the item refunded. The
+asymmetry is the design: a bandage that could be cancelled by chip damage would
+be useless in the only situation it is needed, and a medkit that could be used
+mid-fight would remove the reason to disengage. Refunding rather than consuming
+means a failed medkit costs time, not a scarce resource. Both abort and refund
+on weapon switch or death; neither can start at full health or overheal.
+
+### Audio
+
+V1 ships audio, overriding the prototype-era "no audio in Version 1" line in
+`docs/gameplay.md` (now reconciled). No sample files: every sound is synthesised
+into an `AudioBuffer` at startup from filtered noise and oscillators, which
+keeps the repo self-contained and lets a sound be retuned by changing numbers.
+
+Gunshots layer a transient crack, a filtered noise blast and a low body sine;
+varying the mix is what makes pistol, rifle and shotgun read as different
+weapons rather than one bang at three volumes. Ambience loops cross-fade their
+own head and tail so they do not click at the seam. Voice limiting is per-sound
+and global (24), because a horde otherwise produces dozens of simultaneous
+growls — unpleasant and a real cost on the target hardware.
+
+### Loadout, settings, game flow
+
+Flow is Menu → Loadout → Play → Results → Menu, with settings reachable from
+both the menu and the pause screen. The loadout is weight-budgeted (30 kg) over
+a weapon list rather than fixed slots; the default sits at 29.88 kg and a
+fully-maxed loadout is 47.15 kg, so the budget forces a real choice. Settings
+(graphics/audio/controls) persist to localStorage, with per-field validation so
+one bad or outdated key cannot reset unrelated preferences.
+
+### A regression caught only by running the build
+
+Wiring the settings store into `App.tsx` introduced a subscription that fires
+synchronously on subscribe, which called `Game.setQuality()` before `init()` had
+created the renderer — `Cannot read properties of undefined (reading
+'renderer')`, and the game never reached the menu. `tsc` was entirely happy with
+it. Fixed by guarding on `this.bundle`; the chosen preset still applies at
+startup because `this.quality` is assigned before `init()` reads it. This is the
+concrete case for the roadmap's rule that compiling is not evidence.
+
+### Harness note
+
+`direction` (and other suites) can report a spurious FAIL when several Electron
+instances run concurrently — GPU cache contention, visible as
+`Unable to create cache` / `Gpu Cache Creation failed` in the output. Run a
+suspect suite alone before treating its failure as real; `direction` passed on
+two consecutive solo runs immediately after failing in a contended batch.

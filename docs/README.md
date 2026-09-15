@@ -3,6 +3,13 @@
 ## Purpose
 This documentation defines Version 1 of the project: a single-player, first-person, realistic 3D forest zombie-survival game built without a traditional game engine.
 
+## Scope note (V1 implementation brief, 2026-09-14)
+The delivered V1 narrows this specification. Still in: the bounded forest, first-person
+movement and combat, zombies, firearms plus melee, medical/healing, day/night, weather,
+audio, local settings persistence. Deliberately **cut** from V1 and deferred: world
+looting, random loot, crafting, safe-house gameplay systems, and save/load of run state.
+The pre-game loadout screen replaces world looting as the way the player equips.
+
 ## Core principle
 **Depth over breadth.**
 

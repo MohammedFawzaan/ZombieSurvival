@@ -1,21 +1,13 @@
 import * as THREE from 'three';
 import type { Zombie, ZombieManager } from '../zombies/zombieManager';
 import { ZombieState } from '../state/types';
+import type { ZombieKind } from '../zombies/zombieTypes';
 import { buildZombieRig, createZombieMaterials, type HumanoidParts } from './zombieModel';
+import type { ZombieAssetSet, ZombieClipName } from './zombieAssets';
 import { clamp, damp, lerp } from '../util/math';
 
-/**
- * Must be >= the manager's maxAlive so a visible zombie can never be denied a
- * rig because another one took the last slot. When the pool could run out, the
- * distance-sorted assignment handed slots around between frames and zombies
- * flickered in and out of existence.
- */
 const VISUAL_POOL = 32;
 
-/**
- * Slightly beyond the manager's despawn distance, with hysteresis below, so a
- * zombie hovering near the cutoff does not blink as it crosses it.
- */
 const VISIBLE_DISTANCE = 200;
 const VISIBLE_DISTANCE_HIDE = 210;
 
@@ -25,22 +17,64 @@ interface RigSlot {
   inUse: boolean;
   flashMat: THREE.MeshStandardMaterial[];
   deathLean: number;
-  /**
-   * Locally advanced animation phase. The simulation only advances a zombie's
-   * animPhase on its own LOD tick -- every third step beyond 34 m -- so using
-   * it directly freezes the pose for two steps and then jumps. This phase
-   * advances every rendered frame and is gently steered toward the simulated
-   * one, which keeps limbs moving continuously at any LOD.
-   */
   animPhase: number;
   phaseInit: boolean;
-  /**
-   * Smoothed pose inputs. speed/awareness only change on a zombie's LOD tick,
-   * so feeding them straight into the pose makes limbs snap between values.
-   */
   smoothSpeed: number;
   smoothAware: number;
   smoothChase: number;
+}
+
+interface SkinnedSlot {
+  root: THREE.Group;
+  kind: ZombieKind | null;
+  zombieId: number;
+  inUse: boolean;
+  mixer: THREE.AnimationMixer | null;
+  actions: Map<ZombieClipName, THREE.AnimationAction>;
+  variants: Map<ZombieKind, { scene: THREE.Object3D; mixer: THREE.AnimationMixer; actions: Map<ZombieClipName, THREE.AnimationAction> }>;
+  mats: THREE.MeshStandardMaterial[];
+  weights: Map<ZombieClipName, number>;
+  smoothSpeed: number;
+  smoothChase: number;
+  hitPulse: number;
+  prevHitFlash: number;
+  deathProgress: number;
+  attackProgress: number;
+  staggerProgress: number;
+}
+
+const CLIP_LIST: ZombieClipName[] = ['idle', 'walk', 'chase', 'attack', 'stagger', 'hit', 'death'];
+
+
+const DEATH_SINK = 1.05;
+const DEATH_LINGER_SECONDS = 2.6;
+const DEATH_FADE_SECONDS = 1.0;
+
+function deathFade(z: { alive: boolean; deathTimer: number }): number {
+  if (z.alive || z.deathTimer <= 0) return 1;
+  const elapsed = DEATH_LINGER_SECONDS - z.deathTimer;
+  if (elapsed <= 0) return 1;
+  return Math.max(0, Math.min(1, 1 - elapsed / DEATH_FADE_SECONDS));
+}
+
+function applyFade(root: THREE.Object3D, fade: number): void {
+  const opaque = fade >= 0.999;
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh & { isMesh?: boolean; isSkinnedMesh?: boolean };
+    if (!mesh.isMesh && !mesh.isSkinnedMesh) return;
+    const mat = mesh.material as THREE.Material | THREE.Material[];
+    if (Array.isArray(mat)) {
+      for (const m of mat) {
+        m.transparent = !opaque;
+        m.opacity = fade;
+        m.depthWrite = opaque;
+      }
+    } else {
+      mat.transparent = !opaque;
+      mat.opacity = fade;
+      mat.depthWrite = opaque;
+    }
+  });
 }
 
 export class ZombieRenderer {
@@ -49,6 +83,11 @@ export class ZombieRenderer {
   private readonly assignment = new Map<number, RigSlot>();
   private readonly materials = createZombieMaterials();
   private readonly hitColor = new THREE.Color(0xff5a4a);
+  sourceName = 'procedural';
+
+  private skinned: SkinnedSlot[] = [];
+  private skinnedAssignment = new Map<number, SkinnedSlot>();
+  private assets: ZombieAssetSet | null = null;
 
   constructor() {
     this.group.name = 'zombies';
@@ -59,12 +98,6 @@ export class ZombieRenderer {
       });
       parts.root.visible = false;
       parts.root.matrixAutoUpdate = true;
-      // Rig parts are posed by rotating parents, so each mesh's own bounding
-      // sphere does not describe where it actually ends up. Three.js would
-      // cull individual limbs (or a whole body) against stale local bounds,
-      // which shows up as zombies flickering at the edges of the screen.
-      // The renderer already limits how many rigs exist, so per-part culling
-      // is not worth the artefacts.
       parts.root.traverse((o) => {
         o.frustumCulled = false;
       });
@@ -85,6 +118,81 @@ export class ZombieRenderer {
         smoothSpeed: 0,
         smoothAware: 0,
         smoothChase: 0,
+      });
+    }
+  }
+
+  get usingSkinned(): boolean {
+    return this.assets !== null;
+  }
+
+  enableSkinned(assets: ZombieAssetSet): void {
+    if (this.assets) return;
+    this.assets = assets;
+    this.sourceName = 'glb-skinned';
+
+    for (const slot of this.slots) slot.parts.root.visible = false;
+
+    for (let i = 0; i < VISUAL_POOL; i++) {
+      const root = new THREE.Group();
+      root.name = `zombieSkinned${i}`;
+      root.visible = false;
+      root.frustumCulled = false;
+
+      const variants = new Map<
+        ZombieKind,
+        { scene: THREE.Object3D; mixer: THREE.AnimationMixer; actions: Map<ZombieClipName, THREE.AnimationAction> }
+      >();
+      const mats: THREE.MeshStandardMaterial[] = [];
+
+      for (const kind of ['walker', 'runner', 'brute'] as ZombieKind[]) {
+        const asset = assets[kind];
+        const inst = cloneSkinned(asset.scene);
+        inst.visible = false;
+        inst.frustumCulled = false;
+        root.add(inst);
+
+        const mixer = new THREE.AnimationMixer(inst);
+        const actions = new Map<ZombieClipName, THREE.AnimationAction>();
+        for (const name of CLIP_LIST) {
+          const clip = asset.clips.get(name);
+          if (!clip) continue;
+          const action = mixer.clipAction(clip);
+          action.enabled = true;
+          action.setEffectiveWeight(0);
+          action.play();
+          if (name === 'death') {
+            action.setLoop(THREE.LoopOnce, 1);
+            action.clampWhenFinished = true;
+          }
+          actions.set(name, action);
+        }
+        inst.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          const m = mesh.material as THREE.MeshStandardMaterial | undefined;
+          if (m && !mats.includes(m)) mats.push(m);
+        });
+        variants.set(kind, { scene: inst, mixer, actions });
+      }
+
+      this.group.add(root);
+      this.skinned.push({
+        root,
+        kind: null,
+        zombieId: -1,
+        inUse: false,
+        mixer: null,
+        actions: new Map(),
+        variants,
+        mats,
+        weights: new Map(),
+        smoothSpeed: 0,
+        smoothChase: 0,
+        hitPulse: 0,
+        prevHitFlash: 0,
+        deathProgress: 0,
+        attackProgress: 0,
+        staggerProgress: 0,
       });
     }
   }
@@ -118,15 +226,91 @@ export class ZombieRenderer {
     this.assignment.delete(zombieId);
   }
 
-  /** Visibility of every assigned rig, for flicker verification. */
+  private acquireSkinned(z: Zombie): SkinnedSlot | null {
+    const existing = this.skinnedAssignment.get(z.id);
+    if (existing) return existing;
+    for (const slot of this.skinned) {
+      if (slot.inUse) continue;
+      slot.inUse = true;
+      slot.zombieId = z.id;
+      slot.smoothSpeed = 0;
+      slot.smoothChase = 0;
+      slot.hitPulse = 0;
+      slot.prevHitFlash = z.hitFlash;
+      slot.deathProgress = 0;
+      slot.attackProgress = 0;
+      slot.staggerProgress = 0;
+      slot.weights.clear();
+      this.bindKind(slot, z.kind);
+      slot.root.visible = true;
+      this.skinnedAssignment.set(z.id, slot);
+      return slot;
+    }
+    return null;
+  }
+
+  private bindKind(slot: SkinnedSlot, kind: ZombieKind): void {
+    if (slot.kind === kind) return;
+    for (const [k, v] of slot.variants) {
+      const on = k === kind;
+      v.scene.visible = on;
+      if (!on) {
+        for (const a of v.actions.values()) a.setEffectiveWeight(0);
+      }
+    }
+    const active = slot.variants.get(kind);
+    slot.kind = kind;
+    slot.mixer = active ? active.mixer : null;
+    slot.actions = active ? active.actions : new Map();
+    for (const a of slot.actions.values()) {
+      a.reset();
+      a.setEffectiveWeight(0);
+      a.play();
+    }
+    slot.weights.clear();
+  }
+
+  private releaseSkinned(zombieId: number): void {
+    const slot = this.skinnedAssignment.get(zombieId);
+    if (!slot) return;
+    slot.inUse = false;
+    slot.zombieId = -1;
+    slot.root.visible = false;
+    this.skinnedAssignment.delete(zombieId);
+  }
+
   debugVisibility(): [number, boolean][] {
     const out: [number, boolean][] = [];
+    if (this.assets) {
+      for (const [id, slot] of this.skinnedAssignment) out.push([id, slot.root.visible]);
+      return out;
+    }
     for (const [id, slot] of this.assignment) out.push([id, slot.parts.root.visible]);
+    return out;
+  }
+
+  debugAnimation(): { id: number; clip: string; weight: number; time: number }[] {
+    const out: { id: number; clip: string; weight: number; time: number }[] = [];
+    for (const [id, slot] of this.skinnedAssignment) {
+      let best = 'none';
+      let bw = 0;
+      let time = 0;
+      for (const [name, action] of slot.actions) {
+        const w = action.getEffectiveWeight();
+        if (w > bw) {
+          bw = w;
+          best = name;
+          time = action.time;
+        }
+      }
+      out.push({ id, clip: best, weight: +bw.toFixed(4), time: +time.toFixed(4) });
+    }
     return out;
   }
 
   reset(): void {
     for (const id of [...this.assignment.keys()]) this.release(id);
+    for (const id of [...this.skinnedAssignment.keys()]) this.releaseSkinned(id);
   }
 
   update(manager: ZombieManager, dt: number, cameraPos: THREE.Vector3, time: number): void {
@@ -135,20 +319,130 @@ export class ZombieRenderer {
     for (const z of manager.zombies) {
       if (!(z.alive || z.deathTimer > 0) || z.body === null) continue;
 
-      // Hysteresis: a zombie already on screen is kept until it passes the
-      // wider hide radius, so one hovering at the boundary cannot blink.
-      const held = this.assignment.has(z.id);
+      const held = this.assets ? this.skinnedAssignment.has(z.id) : this.assignment.has(z.id);
       const limit = held ? VISIBLE_DISTANCE_HIDE : VISIBLE_DISTANCE;
       if (z.distToPlayer >= limit) continue;
 
-      const slot = this.acquire(z.id);
-      if (!slot) continue;
-      seen.add(z.id);
-      this.animate(slot, z, dt, cameraPos, time);
+      if (this.assets) {
+        const slot = this.acquireSkinned(z);
+        if (!slot) continue;
+        seen.add(z.id);
+        this.animateSkinned(slot, z, dt);
+      } else {
+        const slot = this.acquire(z.id);
+        if (!slot) continue;
+        seen.add(z.id);
+        this.animate(slot, z, dt, cameraPos, time);
+      }
     }
 
+    if (this.assets) {
+      for (const id of [...this.skinnedAssignment.keys()]) {
+        if (!seen.has(id)) this.releaseSkinned(id);
+      }
+      return;
+    }
     for (const id of [...this.assignment.keys()]) {
       if (!seen.has(id)) this.release(id);
+    }
+  }
+
+  private animateSkinned(slot: SkinnedSlot, z: Zombie, dt: number): void {
+    if (!z.body) return;
+
+    this.bindKind(slot, z.kind);
+
+    z.renderBlend = Math.min(1, z.renderBlend + z.renderBlendRate * dt);
+    const a = z.renderInit ? z.renderBlend : 1;
+    const px = z.prevRenderX + (z.currRenderX - z.prevRenderX) * a;
+    const py = z.prevRenderY + (z.currRenderY - z.prevRenderY) * a;
+    const pz = z.prevRenderZ + (z.currRenderZ - z.prevRenderZ) * a;
+    let dYaw = z.currRenderYaw - z.prevRenderYaw;
+    if (dYaw > Math.PI) dYaw -= Math.PI * 2;
+    else if (dYaw < -Math.PI) dYaw += Math.PI * 2;
+    const renderYaw = z.prevRenderYaw + dYaw * a;
+
+    const fade = deathFade(z);
+    const feetY = py - z.body.feetOffset - (1 - fade) * DEATH_SINK;
+    slot.root.position.set(px, feetY, pz);
+    slot.root.rotation.y = renderYaw;
+    slot.root.scale.setScalar(z.def.scale * (0.82 + fade * 0.18));
+    applyFade(slot.root, fade);
+
+    slot.smoothSpeed = damp(slot.smoothSpeed, z.speed, 9, dt);
+    const chaseTarget =
+      z.state === ZombieState.Chasing || z.state === ZombieState.Detecting ? 1 : 0;
+    slot.smoothChase = damp(slot.smoothChase, chaseTarget, 7, dt);
+
+    if (z.hitFlash > slot.prevHitFlash + 0.05) slot.hitPulse = 1;
+    slot.prevHitFlash = z.hitFlash;
+    slot.hitPulse = Math.max(0, slot.hitPulse - dt * 2.6);
+
+    const dead = z.state === ZombieState.Dead || !z.alive;
+    slot.deathProgress = dead ? Math.min(1, slot.deathProgress + dt * 1.9) : 0;
+
+    const attacking = z.state === ZombieState.Attacking;
+    slot.attackProgress = damp(slot.attackProgress, attacking ? 1 : 0, 11, dt);
+    const staggered = z.state === ZombieState.Staggered;
+    slot.staggerProgress = damp(slot.staggerProgress, staggered ? 1 : 0, 10, dt);
+
+    const chaseSpeed = Math.max(z.def.chaseSpeed, 0.1);
+    const locomotion = clamp(slot.smoothSpeed / chaseSpeed, 0, 1);
+    const moving = clamp((slot.smoothSpeed - 0.08) / 0.5, 0, 1);
+
+    const wDeath = dead ? Math.min(1, slot.deathProgress * 1.35) : 0;
+    const rest = 1 - wDeath;
+    const wStagger = slot.staggerProgress * rest;
+    const afterStagger = rest - wStagger;
+    const wAttack = slot.attackProgress * afterStagger;
+    const afterAttack = afterStagger - wAttack;
+    const wHit = slot.hitPulse * 0.65 * afterAttack;
+    const locoTotal = afterAttack - wHit;
+
+    const runBlend = clamp((locomotion - 0.34) / 0.5, 0, 1);
+    const wChase = locoTotal * moving * runBlend;
+    const wWalk = locoTotal * moving * (1 - runBlend);
+    const wIdle = locoTotal * (1 - moving);
+
+    this.setWeight(slot, 'death', wDeath);
+    this.setWeight(slot, 'stagger', wStagger);
+    this.setWeight(slot, 'attack', wAttack);
+    this.setWeight(slot, 'hit', wHit);
+    this.setWeight(slot, 'chase', wChase);
+    this.setWeight(slot, 'walk', wWalk);
+    this.setWeight(slot, 'idle', wIdle);
+
+    const walkAction = slot.actions.get('walk');
+    const chaseAction = slot.actions.get('chase');
+    const strideRate = lerp(0.85, 1.35, locomotion);
+    if (walkAction) walkAction.setEffectiveTimeScale(strideRate);
+    if (chaseAction) chaseAction.setEffectiveTimeScale(strideRate);
+
+    if (slot.mixer) slot.mixer.update(dt);
+
+    this.applyFlashSkinned(slot, z.hitFlash);
+  }
+
+  private setWeight(slot: SkinnedSlot, name: ZombieClipName, weight: number): void {
+    const action = slot.actions.get(name);
+    if (!action) return;
+    action.setEffectiveWeight(weight);
+    slot.weights.set(name, weight);
+  }
+
+  private applyFlashSkinned(slot: SkinnedSlot, flash: number): void {
+    if (flash <= 0.001) {
+      for (const m of slot.mats) {
+        if (m.emissiveIntensity !== 0) {
+          m.emissiveIntensity = 0;
+          m.emissive.setRGB(0, 0, 0);
+        }
+      }
+      return;
+    }
+    for (const m of slot.mats) {
+      m.emissive.copy(this.hitColor);
+      m.emissiveIntensity = flash * 0.85;
     }
   }
 
@@ -161,9 +455,6 @@ export class ZombieRenderer {
   ): void {
     if (!z.body) return;
 
-    // Advance this zombie's own blend and read an interpolated transform, so
-    // motion is smooth on frames between physics steps and stays smooth for
-    // distant zombies that only think every third step.
     z.renderBlend = Math.min(1, z.renderBlend + z.renderBlendRate * dt);
     const a = z.renderInit ? z.renderBlend : 1;
     const px = z.prevRenderX + (z.currRenderX - z.prevRenderX) * a;
@@ -180,12 +471,12 @@ export class ZombieRenderer {
     const def = z.def;
     const scale = def.scale;
 
-    parts.root.position.set(p.x, feetY, p.z);
+    const fadeP = deathFade(z);
+    applyFade(parts.root, fadeP);
+    parts.root.position.set(p.x, feetY - (1 - fadeP) * DEATH_SINK, p.z);
     parts.root.rotation.y = renderYaw;
     parts.root.scale.setScalar(scale);
 
-    // Advance the pose every frame at the zombie's own animation rate, then
-    // ease toward the simulated phase so the two never drift apart.
     const TAU = Math.PI * 2;
     if (!slot.phaseInit) {
       slot.phaseInit = true;
@@ -201,8 +492,6 @@ export class ZombieRenderer {
     const phase = slot.animPhase;
     const dead = z.state === ZombieState.Dead || !z.alive;
 
-    // Ease the pose inputs so a zombie crossing a state or speed threshold
-    // blends into the new pose instead of snapping to it on its LOD tick.
     const chaseTarget =
       z.state === ZombieState.Chasing || z.state === ZombieState.Detecting ? 1 : 0;
     slot.smoothSpeed = damp(slot.smoothSpeed, z.speed, 9, dt);
@@ -346,4 +635,38 @@ export class ZombieRenderer {
     this.materials.flesh.dispose();
     this.materials.cloth.dispose();
   }
+}
+
+function cloneSkinned(source: THREE.Object3D): THREE.Object3D {
+  const clone = source.clone(true);
+
+  const sourceBones = new Map<string, THREE.Bone>();
+  source.traverse((o) => {
+    if ((o as THREE.Bone).isBone) sourceBones.set(o.name, o as THREE.Bone);
+  });
+  const cloneBones = new Map<string, THREE.Bone>();
+  clone.traverse((o) => {
+    if ((o as THREE.Bone).isBone) cloneBones.set(o.name, o as THREE.Bone);
+  });
+
+  const sourceSkinned: THREE.SkinnedMesh[] = [];
+  source.traverse((o) => {
+    if ((o as THREE.SkinnedMesh).isSkinnedMesh) sourceSkinned.push(o as THREE.SkinnedMesh);
+  });
+  const cloneSkinnedMeshes: THREE.SkinnedMesh[] = [];
+  clone.traverse((o) => {
+    if ((o as THREE.SkinnedMesh).isSkinnedMesh) cloneSkinnedMeshes.push(o as THREE.SkinnedMesh);
+  });
+
+  for (let i = 0; i < cloneSkinnedMeshes.length; i++) {
+    const target = cloneSkinnedMeshes[i];
+    const origin = sourceSkinned[i];
+    if (!origin) continue;
+    const bones = origin.skeleton.bones.map((b) => cloneBones.get(b.name) ?? b);
+    const skeleton = new THREE.Skeleton(bones, origin.skeleton.boneInverses);
+    target.bind(skeleton, origin.bindMatrix);
+    target.material = (origin.material as THREE.Material).clone();
+  }
+
+  return clone;
 }

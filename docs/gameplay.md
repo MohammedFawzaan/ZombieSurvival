@@ -132,9 +132,13 @@ Minimal polished HUD:
 No debug-looking HUD in normal gameplay.
 
 ## Audio
-No actual audio in Version 1.
+Version 1 ships minimal, purposeful audio: weapon fire, reloads, melee impact, zombie
+vocalisations, player damage, footsteps, rain and forest ambience. Sounds are synthesised
+procedurally (`src/audio/soundBank.ts`) rather than shipped as samples. Positional audio
+uses distance attenuation with per-sound and global voice caps. Master/effects/ambience
+volumes are user-settable and persisted. There is deliberately no dynamic music system.
 
-However, gameplay must expose internal noise events such as:
+Separately from audible sound, gameplay exposes internal noise events such as:
 - gunshot
 - movement
 - melee impact

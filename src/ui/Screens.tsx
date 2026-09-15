@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import type { DebugSnapshot, HudSnapshot } from '../state/types';
+import type { DebugSnapshot } from '../state/types';
 
 export const LoadingScreen = memo(function LoadingScreen({
   label,
@@ -36,37 +36,58 @@ const CONTROLS = (
     &nbsp;·&nbsp; <kbd>Ctrl</kbd>/<kbd>C</kbd> crouch
     <br />
     <kbd>LMB</kbd> fire &nbsp;·&nbsp; <kbd>RMB</kbd> aim &nbsp;·&nbsp; <kbd>R</kbd> reload
-    &nbsp;·&nbsp; <kbd>1</kbd>/<kbd>2</kbd>/<kbd>Q</kbd> weapons
+    &nbsp;·&nbsp; <kbd>1</kbd>-<kbd>4</kbd>/<kbd>Q</kbd> weapons &nbsp;·&nbsp; <kbd>F</kbd>/
+    <kbd>G</kbd> heal
     <br />
     <kbd>Esc</kbd> pause &nbsp;·&nbsp; <kbd>F3</kbd> debug overlay
   </div>
 );
 
-export const StartScreen = memo(function StartScreen({ onStart }: { onStart: () => void }) {
+export type QualityChoice = 'low' | 'medium' | 'high';
+
+export const StartScreen = memo(function StartScreen({
+  onStart,
+  onSettings,
+  onExit,
+}: {
+  onStart: () => void;
+  onSettings: () => void;
+  onExit: () => void;
+}) {
   return (
     <div className="screen overlay--interactive">
+      <p className="screen__eyebrow">Version 1</p>
       <h1 className="screen__title">Zombie Survival</h1>
-      <p className="screen__subtitle">Core Prototype</p>
-      <button className="btn" onClick={onStart} autoFocus>
-        Enter the forest
-      </button>
+      <p className="screen__subtitle">Survive the forest</p>
+      <div className="screen__rule" />
+      <div className="btn-row">
+        <button className="btn" onClick={onStart} autoFocus>
+          New run
+        </button>
+        <button className="btn btn--ghost" onClick={onSettings}>
+          Settings
+        </button>
+      </div>
       {CONTROLS}
+      <button className="link-btn" onClick={onExit}>
+        Exit game
+      </button>
     </div>
   );
 });
-
-export type QualityChoice = 'low' | 'medium' | 'high';
 
 export const PauseScreen = memo(function PauseScreen({
   onResume,
   onRestart,
   onQuit,
+  onSettings,
   quality,
   onQuality,
 }: {
   onResume: () => void;
   onRestart: () => void;
   onQuit: () => void;
+  onSettings: () => void;
   quality: QualityChoice;
   onQuality: (q: QualityChoice) => void;
 }) {
@@ -82,8 +103,11 @@ export const PauseScreen = memo(function PauseScreen({
         <button className="btn btn--ghost" onClick={onRestart}>
           Restart
         </button>
+        <button className="btn btn--ghost" onClick={onSettings}>
+          Settings
+        </button>
         <button className="btn btn--ghost" onClick={onQuit}>
-          Quit
+          Main menu
         </button>
       </div>
       <div className="settings-row">
@@ -99,41 +123,6 @@ export const PauseScreen = memo(function PauseScreen({
         ))}
       </div>
       {CONTROLS}
-    </div>
-  );
-});
-
-export const DeathScreen = memo(function DeathScreen({
-  snap,
-  onRestart,
-}: {
-  snap: HudSnapshot;
-  onRestart: () => void;
-}) {
-  const minutes = Math.floor(snap.survivedSeconds / 60);
-  const seconds = Math.floor(snap.survivedSeconds % 60);
-  return (
-    <div className="screen screen--death overlay--interactive">
-      <h1 className="screen__title">You Died</h1>
-      <p className="screen__subtitle">The forest keeps what it takes</p>
-      <div className="screen__summary">
-        <div className="summary-item">
-          <span className="summary-item__value">{snap.kills}</span>
-          <span className="summary-item__label">Zombies killed</span>
-        </div>
-        <div className="summary-item">
-          <span className="summary-item__value">
-            {minutes}:{String(seconds).padStart(2, '0')}
-          </span>
-          <span className="summary-item__label">Time survived</span>
-        </div>
-      </div>
-      <button className="btn" onClick={onRestart} autoFocus>
-        Restart
-      </button>
-      <div className="screen__hint">
-        Aim for the head — headshots do triple damage. Sprinting is loud; crouching is quiet.
-      </div>
     </div>
   );
 });

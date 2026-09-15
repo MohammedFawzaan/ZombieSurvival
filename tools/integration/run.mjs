@@ -18,11 +18,18 @@ const SUITES = {
   screenshots: 'screenshots.cjs',
   pacing: 'pacing.cjs',
   flicker: 'flicker.cjs',
+  zombieart: 'zombieart.cjs',
+  zombieshots: 'zombieshots.cjs',
   deathflow: 'deathflow.cjs',
+  menureset: 'menureset.cjs',
+  uishot: 'uishot.cjs',
+  atmosphere: 'atmosphere.cjs',
+  skycheck: 'skycheck.cjs',
+  prodlaunch: 'prodlaunch.cjs',
 };
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith('-'));
-const names = requested.length > 0 ? requested : Object.keys(SUITES).filter((n) => n !== 'screenshots');
+const names = requested.length > 0 ? requested : Object.keys(SUITES).filter((n) => n !== 'screenshots' && n !== 'zombieshots' && n !== 'uishot');
 
 if (!existsSync(path.join(root, 'dist', 'index.html'))) {
   console.error('dist/index.html is missing. Run "npm run build" first.');

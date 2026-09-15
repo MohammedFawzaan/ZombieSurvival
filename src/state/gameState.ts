@@ -1,7 +1,15 @@
-import { GamePhase, type HudSnapshot, type WeaponId } from './types';
+import {
+  GamePhase,
+  MeleePhase,
+  type AmmoType,
+  type HudSnapshot,
+  type MedicalSnapshot,
+  type WeaponId,
+} from './types';
 
 export interface GameEvents {
   onPhaseChange?: (phase: GamePhase) => void;
+  onDamaged?: (amount: number) => void;
 }
 
 const DAMAGE_DIR_LIFE = 2.2;
@@ -44,6 +52,18 @@ export class GameState {
   magazineSize = 0;
   reserve = 0;
   reloading = false;
+  usesAmmo = true;
+  ammoType: AmmoType = '9mm';
+  readonly weaponSlots: HudSnapshot['weaponSlots'] = [];
+  meleePhase: MeleePhase = MeleePhase.Idle;
+  meleeProgress = 0;
+  medical: MedicalSnapshot = {
+    usingId: null,
+    usingName: null,
+    progress: 0,
+    quantities: [],
+    interruptedFor: 0,
+  };
   aiming = false;
   sprinting = false;
   crouching = false;
@@ -94,6 +114,7 @@ export class GameState {
       }
     }
 
+    this.events.onDamaged?.(amount);
     if (this.health <= 0) this.setPhase(GamePhase.Dead);
     this.emit();
   }
@@ -182,6 +203,11 @@ export class GameState {
       magazineSize: this.magazineSize,
       reserve: this.reserve,
       reloading: this.reloading,
+      usesAmmo: this.usesAmmo,
+      ammoType: this.ammoType,
+      weaponSlots: this.weaponSlots.map((w) => ({ ...w })),
+      melee: { phase: this.meleePhase, progress: this.meleeProgress },
+      medical: this.medical,
       aiming: this.aiming,
       sprinting: this.sprinting,
       crouching: this.crouching,

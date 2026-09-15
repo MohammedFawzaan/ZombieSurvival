@@ -169,6 +169,16 @@ export class Player {
     this.yaw += yawKick;
   }
 
+  canSpendStamina(amount: number): boolean {
+    return !this.state.exhausted && this.state.stamina >= amount;
+  }
+
+  spendStamina(amount: number): void {
+    this.state.stamina = Math.max(0, this.state.stamina - amount);
+    this.staminaIdle = 0;
+    if (this.state.stamina <= 0) this.state.exhausted = true;
+  }
+
   step(dt: number, input: InputIntent): void {
     const t = PLAYER_TUNING;
 

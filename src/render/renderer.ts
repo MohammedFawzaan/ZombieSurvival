@@ -18,6 +18,11 @@ export interface QualitySettings {
   anisotropy: number;
   vegetationDensity: number;
   grassEnabled: boolean;
+  rainEnabled: boolean;
+  rainDropCount: number;
+  rainSplashes: boolean;
+  skyCloudsEnabled: boolean;
+  starsEnabled: boolean;
 }
 
 export const QUALITY_PRESETS: Record<'low' | 'medium' | 'high', QualitySettings> = {
@@ -28,6 +33,11 @@ export const QUALITY_PRESETS: Record<'low' | 'medium' | 'high', QualitySettings>
     anisotropy: 2,
     vegetationDensity: 0.55,
     grassEnabled: false,
+    rainEnabled: false,
+    rainDropCount: 0,
+    rainSplashes: false,
+    skyCloudsEnabled: false,
+    starsEnabled: false,
   },
   medium: {
     shadowMapSize: 1536,
@@ -36,6 +46,11 @@ export const QUALITY_PRESETS: Record<'low' | 'medium' | 'high', QualitySettings>
     anisotropy: 4,
     vegetationDensity: 0.8,
     grassEnabled: true,
+    rainEnabled: true,
+    rainDropCount: 2600,
+    rainSplashes: false,
+    skyCloudsEnabled: true,
+    starsEnabled: true,
   },
   high: {
     shadowMapSize: 2048,
@@ -44,6 +59,11 @@ export const QUALITY_PRESETS: Record<'low' | 'medium' | 'high', QualitySettings>
     anisotropy: 8,
     vegetationDensity: 1,
     grassEnabled: true,
+    rainEnabled: true,
+    rainDropCount: 5200,
+    rainSplashes: true,
+    skyCloudsEnabled: true,
+    starsEnabled: true,
   },
 };
 

@@ -10,7 +10,10 @@ export interface InputIntent {
   aim: boolean;
   reload: boolean;
   interact: boolean;
-  switchTo: 1 | 2 | null;
+  switchTo: 1 | 2 | 3 | 4 | null;
+  cycleDir: 1 | -1 | 0;
+  useMedical: boolean;
+  useMedicalAlt: boolean;
   nextWeapon: boolean;
   lookX: number;
   lookY: number;
@@ -34,7 +37,11 @@ const KEY_MAP = {
   KeyE: 'interact',
   Digit1: 'slot1',
   Digit2: 'slot2',
+  Digit3: 'slot3',
+  Digit4: 'slot4',
   KeyQ: 'nextWeapon',
+  KeyF: 'useMedical',
+  KeyG: 'useMedicalAlt',
 } as const;
 
 type Action = (typeof KEY_MAP)[keyof typeof KEY_MAP];
@@ -53,6 +60,7 @@ export class InputSystem {
   private lockRetryTimer = 0;
 
   sensitivity = 0.0022;
+  sensitivityScale = 1;
   invertY = false;
   locked = false;
 
@@ -291,14 +299,28 @@ export class InputSystem {
     out.reload = on && this.pressed.has('reload');
     out.interact = on && this.pressed.has('interact');
     out.nextWeapon = on && (this.pressed.has('nextWeapon') || this.wheel !== 0);
-    out.switchTo = on && this.pressed.has('slot1') ? 1 : on && this.pressed.has('slot2') ? 2 : null;
+    out.cycleDir = on && this.wheel !== 0 ? (this.wheel > 0 ? 1 : -1) : 0;
+    out.switchTo = !on
+      ? null
+      : this.pressed.has('slot1')
+        ? 1
+        : this.pressed.has('slot2')
+          ? 2
+          : this.pressed.has('slot3')
+            ? 3
+            : this.pressed.has('slot4')
+              ? 4
+              : null;
+    out.useMedical = on && this.pressed.has('useMedical');
+    out.useMedicalAlt = on && this.pressed.has('useMedicalAlt');
     out.fire = on && this.mouseLeft;
     out.firePressed = on && this.mouseLeftPressed;
     out.aim = on && this.mouseRight;
 
     const sy = this.invertY ? -1 : 1;
-    out.lookX = on ? this.mouseDx * this.sensitivity : 0;
-    out.lookY = on ? this.mouseDy * this.sensitivity * sy : 0;
+    const scale = this.sensitivity * this.sensitivityScale;
+    out.lookX = on ? this.mouseDx * scale : 0;
+    out.lookY = on ? this.mouseDy * scale * sy : 0;
 
     this.pressed.clear();
     this.mouseLeftPressed = false;
@@ -322,6 +344,9 @@ export class InputSystem {
       reload: false,
       interact: false,
       switchTo: null,
+      cycleDir: 0,
+      useMedical: false,
+      useMedicalAlt: false,
       nextWeapon: false,
       lookX: 0,
       lookY: 0,

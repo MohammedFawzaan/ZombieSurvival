@@ -7,4 +7,6 @@ screenshots/
 .DS_Store
 Thumbs.db
 
+.env
+
 err.logs

@@ -185,30 +185,63 @@ export const Hud = memo(function Hud({ snap, spreadPx, reloadProgress }: HudProp
 
         <div className="hud__weapon">
           <div className="hud__weapon-name">{snap.weaponName}</div>
-          <div className="hud__ammo">
-            <span className={`hud__ammo-mag ${magClass}`}>{snap.magazine}</span>
-            <span className="hud__ammo-reserve">/ {snap.reserve}</span>
-          </div>
-          {snap.reloading ? (
-            <>
-              <div className="hud__reload">Reloading</div>
-              <div className="hud__reload-bar">
-                <span style={{ transform: `scaleX(${clamp(reloadProgress, 0, 1)})` }} />
-              </div>
-            </>
+          {snap.usesAmmo ? (
+            <div className="hud__ammo">
+              <span className={`hud__ammo-mag ${magClass}`}>{snap.magazine}</span>
+              <span className="hud__ammo-reserve">/ {snap.reserve}</span>
+            </div>
           ) : (
-            snap.magazine === 0 && <div className="hud__reload">Press R to reload</div>
+            <div className="hud__ammo hud__ammo--melee">
+              <span className="hud__melee-label">Melee</span>
+            </div>
           )}
+          {snap.usesAmmo &&
+            (snap.reloading ? (
+              <>
+                <div className="hud__reload">Reloading</div>
+                <div className="hud__reload-bar">
+                  <span style={{ transform: `scaleX(${clamp(reloadProgress, 0, 1)})` }} />
+                </div>
+              </>
+            ) : (
+              snap.magazine === 0 && <div className="hud__reload">Press R to reload</div>
+            ))}
           <div className="hud__slots">
-            <div className={`slot${snap.weaponId === 'pistol' ? ' is-active' : ''}`}>
-              <span className="slot__key">1</span> Pistol
-            </div>
-            <div className={`slot${snap.weaponId === 'rifle' ? ' is-active' : ''}`}>
-              <span className="slot__key">2</span> Rifle
-            </div>
+            {snap.weaponSlots.map((slot, i) => (
+              <div key={slot.id} className={`slot${slot.active ? ' is-active' : ''}`}>
+                <span className="slot__key">{i + 1}</span> {slot.name}
+              </div>
+            ))}
           </div>
         </div>
+
+        {snap.medical.quantities.length > 0 && (
+          <div className="hud__medical">
+            {snap.medical.quantities.map((m, i) => (
+              <div className="med-slot" key={m.id}>
+                <span className="med-slot__key">{i === 0 ? 'F' : 'G'}</span>
+                <span className="med-slot__name">{m.name}</span>
+                <b className="med-slot__count">{m.count}</b>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
+
+      {snap.medical.usingId && (
+        <div className="heal-progress">
+          <div className="heal-progress__label">
+            Using {snap.medical.usingName}
+          </div>
+          <div className="heal-progress__bar">
+            <span style={{ transform: `scaleX(${clamp(snap.medical.progress, 0, 1)})` }} />
+          </div>
+        </div>
+      )}
+
+      {snap.medical.interruptedFor > 0 && (
+        <div className="heal-interrupted">Healing interrupted</div>
+      )}
 
       <Crosshair
         spreadPx={spreadPx}

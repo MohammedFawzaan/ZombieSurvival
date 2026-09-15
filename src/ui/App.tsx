@@ -3,13 +3,16 @@ import { Game } from '../core/game';
 import { GamePhase, type DebugSnapshot, type HudSnapshot } from '../state/types';
 import { Hud } from './Hud';
 import {
-  DeathScreen,
   DebugOverlay,
   LoadingScreen,
   PauseScreen,
   StartScreen,
   type QualityChoice,
 } from './Screens';
+import { LoadoutScreen, ResultsScreen } from './LoadoutScreen';
+import { SettingsScreen } from './SettingsScreen';
+import { SettingsStore, type Settings } from '../settings/settings';
+import { defaultLoadout, type Loadout } from '../inventory/loadout';
 
 declare global {
   interface Window {
@@ -22,9 +25,13 @@ declare global {
   }
 }
 
+type Overlay = 'none' | 'loadout' | 'settings';
+
 export function App(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gameRef = useRef<Game | null>(null);
+  const settingsRef = useRef<SettingsStore | null>(null);
+  if (settingsRef.current === null) settingsRef.current = new SettingsStore();
 
   const [loading, setLoading] = useState(true);
   const [loadLabel, setLoadLabel] = useState('Booting');
@@ -35,14 +42,20 @@ export function App(): JSX.Element {
   const [debugOn, setDebugOn] = useState(false);
   const [spreadPx, setSpreadPx] = useState(4);
   const [reloadProgress, setReloadProgress] = useState(0);
-  const [quality, setQuality] = useState<QualityChoice>('medium');
+  const [settings, setSettings] = useState<Settings>(settingsRef.current.value);
+  const [overlay, setOverlay] = useState<Overlay>('none');
+  const [loadout, setLoadout] = useState<Loadout>(() => defaultLoadout());
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     let disposed = false;
 
-    const game = new Game(canvas, { quality: 'medium', rendererPreference: 'auto' });
+    const store = settingsRef.current!;
+    const game = new Game(canvas, {
+      quality: store.value.graphics.quality,
+      rendererPreference: 'auto',
+    });
     gameRef.current = game;
     window.game = game;
 
@@ -57,6 +70,17 @@ export function App(): JSX.Element {
     });
     const unsubDebug = game.subscribeDebug((d) => {
       if (!disposed) setDebug(d);
+    });
+
+    const unsubSettings = store.subscribe((s) => {
+      if (disposed) return;
+      setSettings(s);
+      game.setQuality(s.graphics.quality);
+      game.input.sensitivityScale = s.controls.sensitivity;
+      game.input.invertY = s.controls.invertY;
+      game.audio.setLevels(s.audio.master, s.audio.effects, s.audio.ambience);
+      game.applyWeatherPreference(s.graphics.weather);
+      game.applyTimePreference(s.graphics.timeOfDay);
     });
 
     game
@@ -76,6 +100,8 @@ export function App(): JSX.Element {
       disposed = true;
       unsubState();
       unsubDebug();
+      unsubSettings();
+      store.flush();
       game.dispose();
       gameRef.current = null;
       delete window.game;
@@ -96,26 +122,60 @@ export function App(): JSX.Element {
     return () => window.clearInterval(id);
   }, []);
 
-  const handleStart = useCallback(() => {
-    gameRef.current?.startNewRun();
-  }, []);
+  const updateSettings = useCallback(
+    (patch: Parameters<SettingsStore['update']>[0]) => {
+      const store = settingsRef.current;
+      if (!store) return;
+      const next = store.update(patch);
+      if (patch.graphics && 'fullscreen' in patch.graphics) {
+        void window.desktop?.toggleFullscreen();
+      }
+      return next;
+    },
+    [],
+  );
+
+  const handleOpenLoadout = useCallback(() => setOverlay('loadout'), []);
+
+  const handleDeploy = useCallback(() => {
+    const game = gameRef.current;
+    if (!game) return;
+    game.setLoadout(loadout);
+    setOverlay('none');
+    void game.audio.start();
+    game.startNewRun();
+  }, [loadout]);
+
   const handleResume = useCallback(() => {
     gameRef.current?.resume();
   }, []);
   const handleRestart = useCallback(() => {
-    gameRef.current?.startNewRun();
+    const game = gameRef.current;
+    if (!game) return;
+    game.setLoadout(loadout);
+    void game.audio.start();
+    game.startNewRun();
+  }, [loadout]);
+  const handleMenu = useCallback(() => {
+    gameRef.current?.returnToMenu();
+    setOverlay('none');
   }, []);
-  const handleQuit = useCallback(() => {
+  const handleExit = useCallback(() => {
+    settingsRef.current?.flush();
     void window.desktop?.quit();
   }, []);
-  const handleQuality = useCallback((q: QualityChoice) => {
-    gameRef.current?.setQuality(q);
-    setQuality(q);
+  const handleQuality = useCallback(
+    (q: QualityChoice) => {
+      updateSettings({ graphics: { quality: q } });
+    },
+    [updateSettings],
+  );
+  const handleResetSettings = useCallback(() => {
+    settingsRef.current?.reset();
   }, []);
 
   const phase = snap?.phase ?? GamePhase.Loading;
 
-  // Let the death collapse play before the screen covers it.
   const [deathReady, setDeathReady] = useState(false);
   useEffect(() => {
     if (phase !== GamePhase.Dead) {
@@ -126,31 +186,64 @@ export function App(): JSX.Element {
     return () => window.clearTimeout(t);
   }, [phase]);
 
+  const playing = phase === GamePhase.Playing || phase === GamePhase.Paused;
+
   return (
     <div className="app">
       <canvas id="game-canvas" ref={canvasRef} tabIndex={-1} />
 
-      {snap && phase === GamePhase.Playing && (
+      {snap && playing && (
         <Hud snap={snap} spreadPx={spreadPx} reloadProgress={reloadProgress} />
       )}
-      {snap && phase === GamePhase.Paused && (
-        <Hud snap={snap} spreadPx={spreadPx} reloadProgress={reloadProgress} />
-      )}
+
+      {phase === GamePhase.Dead && <div className="death-fade" />}
 
       {debugOn && debug && <DebugOverlay d={debug} />}
 
-      {!loading && phase === GamePhase.Menu && <StartScreen onStart={handleStart} />}
-      {!loading && phase === GamePhase.Paused && (
+      {!loading && phase === GamePhase.Menu && overlay === 'none' && (
+        <StartScreen
+          onStart={handleOpenLoadout}
+          onSettings={() => setOverlay('settings')}
+          onExit={handleExit}
+        />
+      )}
+
+      {!loading && overlay === 'loadout' && (
+        <LoadoutScreen
+          loadout={loadout}
+          onChange={setLoadout}
+          onDeploy={handleDeploy}
+          onBack={() => setOverlay('none')}
+        />
+      )}
+
+      {!loading && overlay === 'settings' && (
+        <SettingsScreen
+          settings={settings}
+          onChange={updateSettings}
+          onClose={() => setOverlay('none')}
+          onReset={handleResetSettings}
+        />
+      )}
+
+      {!loading && phase === GamePhase.Paused && overlay === 'none' && (
         <PauseScreen
           onResume={handleResume}
           onRestart={handleRestart}
-          onQuit={handleQuit}
-          quality={quality}
+          onQuit={handleMenu}
+          onSettings={() => setOverlay('settings')}
+          quality={settings.graphics.quality}
           onQuality={handleQuality}
         />
       )}
+
       {!loading && snap && phase === GamePhase.Dead && deathReady && (
-        <DeathScreen snap={snap} onRestart={handleRestart} />
+        <ResultsScreen
+          kills={snap.kills}
+          survivedSeconds={snap.survivedSeconds}
+          onRestart={handleRestart}
+          onMenu={handleMenu}
+        />
       )}
 
       {(loading || error) && (

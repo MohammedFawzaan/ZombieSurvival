@@ -24,9 +24,13 @@ export const enum HitRegion {
   Limb = 'limb',
 }
 
-export type WeaponId = 'pistol' | 'rifle';
+export type WeaponId = 'pistol' | 'rifle' | 'shotgun' | 'machete';
 
-export type AmmoType = '9mm' | '556';
+export type AmmoType = '9mm' | '556' | '12g' | 'none';
+
+export type WeaponClass = 'hitscan' | 'pellet' | 'melee';
+
+export type MedicalId = 'bandage' | 'medkit';
 
 export interface WeaponRuntime {
   id: WeaponId;
@@ -34,6 +38,26 @@ export interface WeaponRuntime {
   reserve: number;
   reloading: boolean;
   reloadEndsAt: number;
+}
+
+export const enum MeleePhase {
+  Idle = 'idle',
+  Windup = 'windup',
+  Active = 'active',
+  Recovery = 'recovery',
+}
+
+export interface MeleeSnapshot {
+  phase: MeleePhase;
+  progress: number;
+}
+
+export interface MedicalSnapshot {
+  usingId: MedicalId | null;
+  usingName: string | null;
+  progress: number;
+  quantities: { id: MedicalId; name: string; count: number }[];
+  interruptedFor: number;
 }
 
 export interface HudSnapshot {
@@ -49,6 +73,11 @@ export interface HudSnapshot {
   magazineSize: number;
   reserve: number;
   reloading: boolean;
+  usesAmmo: boolean;
+  ammoType: AmmoType;
+  weaponSlots: { id: WeaponId; name: string; usesAmmo: boolean; active: boolean }[];
+  melee: MeleeSnapshot;
+  medical: MedicalSnapshot;
   aiming: boolean;
   sprinting: boolean;
   crouching: boolean;

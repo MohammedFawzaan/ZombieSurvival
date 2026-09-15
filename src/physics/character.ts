@@ -1,6 +1,6 @@
 import type RAPIER from '@dimforge/rapier3d-compat';
 import type { PhysicsWorld } from './physics';
-import { FILTER } from './physics';
+import { FILTER, groups } from './physics';
 
 export interface CharacterOptions {
   radius: number;
@@ -55,6 +55,14 @@ export class CharacterBody {
     c.setApplyImpulsesToDynamicBodies(false);
     c.setSlideEnabled(true);
     this.controller = c;
+  }
+
+  disableCollision(): void {
+    this.collider.setCollisionGroups(groups(0, 0));
+  }
+
+  restoreCollision(): void {
+    this.collider.setCollisionGroups(this.opts.isPlayer ? FILTER.player : FILTER.zombie);
   }
 
   get position(): { x: number; y: number; z: number } {

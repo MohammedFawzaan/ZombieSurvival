@@ -20,12 +20,23 @@ import { Player } from '../player/player';
 import { ZombieManager, DEFAULT_ZOMBIE_OPTIONS } from '../zombies/zombieManager';
 import { CombatSystem, type ShotOutcome } from '../combat/combat';
 import { WeaponSystem } from '../weapons/weaponSystem';
+import { Inventory } from '../inventory/inventory';
+import { defaultLoadout, type Loadout } from '../inventory/loadout';
+import { MedicalSystem } from '../medical/medicalSystem';
+import type { MedicalId } from '../state/types';
 import type { WeaponDef } from '../weapons/definitions';
 import { createRenderer, type RendererBundle, type RendererPreference } from '../render/rendererFactory';
 import { QUALITY_PRESETS, applyQuality, type QualitySettings } from '../render/renderer';
 import { Atmosphere } from '../render/sky';
+import { AtmosphereGrading } from '../render/atmosphereGrading';
+import { WeatherFx } from '../render/weatherFx';
+import { DayNightCycle } from '../time/dayNight';
+import { WeatherSystem, WeatherKind, weatherName } from '../weather/weather';
+import { computeAmbienceMix, type AmbienceMix } from '../weather/ambienceMix';
 import { buildTerrainMesh } from '../render/terrainMesh';
 import { ZombieRenderer } from '../render/zombieRenderer';
+import { loadZombieAssets } from '../render/zombieAssets';
+import { AudioBridge } from '../audio/audioBridge';
 import { ViewModel } from '../render/viewModel';
 import { EffectsSystem } from '../render/effects';
 import { clamp, damp } from '../util/math';
@@ -36,6 +47,7 @@ export interface GameOptions {
   quality: QualityLevel;
   rendererPreference: RendererPreference;
   seed: number;
+  skinnedZombies: boolean;
 }
 
 const VIEWMODEL_FOV = 58;
@@ -44,6 +56,7 @@ const DEFAULT_OPTIONS: GameOptions = {
   quality: 'medium',
   rendererPreference: 'auto',
   seed: DEFAULT_TERRAIN.seed,
+  skinnedZombies: true,
 };
 
 export class Game {
@@ -75,6 +88,15 @@ export class Game {
     ambient: THREE.AmbientLight;
   };
   private atmosphere!: Atmosphere;
+  private weatherFx!: WeatherFx;
+  private readonly grading = new AtmosphereGrading();
+  readonly dayNight = new DayNightCycle();
+  readonly weather = new WeatherSystem();
+  private readonly ambienceMix: AmbienceMix = {
+    ambienceForest: 0,
+    ambienceNight: 0,
+    ambienceRain: 0,
+  };
 
   private physics!: PhysicsWorld;
   private terrain!: Terrain;
@@ -88,6 +110,10 @@ export class Game {
   private zombies!: ZombieManager;
   private combat!: CombatSystem;
   private weapons!: WeaponSystem;
+  private inventory = new Inventory(defaultLoadout());
+  private medical!: MedicalSystem;
+  private pendingLoadout: Loadout | null = null;
+  readonly audio = new AudioBridge();
   private noise = new NoiseSystem();
 
   private zombieRenderer!: ZombieRenderer;
@@ -107,7 +133,10 @@ export class Game {
     reload: boolean;
     interact: boolean;
     nextWeapon: boolean;
-    switchTo: 1 | 2 | null;
+    switchTo: 1 | 2 | 3 | 4 | null;
+    cycleDir: 1 | -1 | 0;
+    useMedical: boolean;
+    useMedicalAlt: boolean;
   } = {
     jump: false,
     firePressed: false,
@@ -115,14 +144,20 @@ export class Game {
     interact: false,
     nextWeapon: false,
     switchTo: null,
+    cycleDir: 0,
+    useMedical: false,
+    useMedicalAlt: false,
   };
   private renderTime = 0;
+  private exposure = 1.05;
   private deathAnim = 0;
   private deathRoll = 0;
   private deathYaw = 0;
   private deathDriftX = 0;
   private deathDriftZ = 0;
   private deathPitchBias = 0;
+  private deathStartElapsed = 0;
+  private lastReloading = false;
   private lookAccumX = 0;
   private lookAccumY = 0;
 
@@ -205,11 +240,18 @@ export class Game {
     progress('Lighting world', 0.75);
     this.atmosphere = new Atmosphere(this.quality.shadowMapSize, this.quality.shadowDistance);
     this.atmosphere.addTo(this.scene);
+    this.weatherFx = new WeatherFx(this.quality);
+    this.scene.add(this.weatherFx.group);
+    this.applyAtmosphere(0);
 
     progress('Spawning player', 0.85);
     const spawn = this.findPlayerSpawn();
     this.player = new Player(this.physics, this.state, spawn.x, spawn.y, spawn.z);
-    this.weapons = new WeaponSystem(this.state);
+    this.weapons = new WeaponSystem(this.state, this.inventory);
+    this.medical = new MedicalSystem(this.state, this.inventory);
+    this.weapons.onWeaponSwitched = () => this.medical.notifyWeaponSwitched();
+    this.medical.onStarted = () => this.audio.healUsed();
+    this.medical.onHealed = () => this.audio.healComplete();
 
     progress('Releasing the dead', 0.92);
     this.zombies = new ZombieManager(
@@ -228,16 +270,26 @@ export class Game {
       // camera yaw (forward is -Z, so the Z term is negated).
       const angle = Math.atan2(fromX - pp.x, -(fromZ - pp.z));
       this.state.damage(amount, angle);
+      this.audio.playerHurt();
+      this.audio.zombieAttacked(fromX, pp.y, fromZ);
     };
     this.zombies.onZombieDied = (z) => {
       if (z.body) {
         const p = z.body.position;
-        this.effects.spawnDeathBurst(p.x, p.y - z.body.feetOffset, p.z);
+        this.audio.zombieDied(p.x, p.y - z.body.feetOffset, p.z);
       }
     };
 
     this.zombieRenderer = new ZombieRenderer();
     this.scene.add(this.zombieRenderer.group);
+    if (this.options.skinnedZombies) {
+      try {
+        const assets = await loadZombieAssets();
+        this.zombieRenderer.enableSkinned(assets);
+      } catch (err) {
+        console.warn('zombie GLB load failed, using procedural rigs', err);
+      }
+    }
     this.effects = new EffectsSystem();
     this.scene.add(this.effects.group);
 
@@ -263,7 +315,10 @@ export class Game {
     this.culler.update(this.player.eye.x, this.player.eye.z, 1, true);
 
     this.input.attach(this.canvas);
-    this.state.setEvents({ onPhaseChange: (phase) => this.handlePhaseChange(phase) });
+    this.state.setEvents({
+      onPhaseChange: (phase) => this.handlePhaseChange(phase),
+      onDamaged: () => this.medical.notifyDamaged(),
+    });
 
     this.input.setCallbacks({
       onEscape: () => this.handleEscape(),
@@ -314,9 +369,19 @@ export class Game {
     return { x: 0, y: this.terrain.heightAt(0, 0) + 0.4, z: 0 };
   }
 
+  setLoadout(loadout: Loadout): void {
+    this.pendingLoadout = loadout;
+  }
+
   startNewRun(): void {
     this.state.reset();
+    if (this.pendingLoadout) {
+      this.inventory.applyLoadout(this.pendingLoadout);
+      this.pendingLoadout = null;
+    }
+    this.audio.reset();
     this.weapons.reset();
+    this.medical.reset();
     this.zombies.reset();
     this.zombieRenderer.reset();
     this.effects.reset();
@@ -347,6 +412,57 @@ export class Game {
     if (!this.headless) this.input.requestLock();
   }
 
+  applyWeatherPreference(pref: 'dynamic' | 'clear' | 'cloudy' | 'rain'): void {
+    if (pref === 'dynamic') {
+      this.weather.setAutoChange(true);
+      return;
+    }
+    this.weather.setAutoChange(false);
+    const kind =
+      pref === 'clear'
+        ? WeatherKind.Clear
+        : pref === 'cloudy'
+          ? WeatherKind.Cloudy
+          : WeatherKind.Rain;
+    this.weather.setWeather(kind, false);
+  }
+
+  applyTimePreference(pref: 'dynamic' | 'morning' | 'day' | 'evening' | 'night'): void {
+    if (pref === 'dynamic') {
+      this.dayNight.paused = false;
+      return;
+    }
+    const hour =
+      pref === 'morning' ? 7.5 : pref === 'day' ? 12.5 : pref === 'evening' ? 18.5 : 23.5;
+    this.dayNight.setHour(hour);
+    this.dayNight.paused = true;
+    this.applyAtmosphere(0);
+  }
+
+  returnToMenu(): void {
+    this.input.setEnabled(false);
+    this.input.releaseLock();
+    this.audio.stopAll();
+    this.audio.reset();
+    this.state.reset();
+    this.weapons.reset();
+    this.medical.reset();
+    this.zombies.reset();
+    this.zombieRenderer.reset();
+    this.effects.reset();
+    this.noise.clear();
+    this.dayNight.reset();
+    this.weather.reset();
+    this.weatherFx.reset();
+    this.deathAnim = 0;
+    this.lastReloading = false;
+    const spawn = this.findPlayerSpawn();
+    this.player.respawn(spawn.x, spawn.y, spawn.z);
+    this.culler.update(this.player.eye.x, this.player.eye.z, 1, true);
+    this.applyAtmosphere(0);
+    this.state.setPhase(GamePhase.Menu);
+  }
+
   pause(): void {
     if (this.state.phase !== GamePhase.Playing) return;
     this.state.setPhase(GamePhase.Paused);
@@ -373,6 +489,7 @@ export class Game {
       this.input.releaseLock();
       // Fall to one side, chosen once so the collapse is not symmetrical.
       const dir = Math.random() < 0.5 ? -1 : 1;
+      this.deathStartElapsed = this.clock.elapsed;
       this.deathRoll = dir * (1.28 + Math.random() * 0.3);
       this.deathYaw = dir * (0.3 + Math.random() * 0.18);
       this.deathPitchBias = (Math.random() - 0.5) * 0.2;
@@ -395,6 +512,7 @@ export class Game {
   setQuality(level: QualityLevel): void {
     this.options.quality = level;
     this.quality = QUALITY_PRESETS[level];
+    if (!this.bundle) return;
     applyQuality(this.bundle.renderer, this.quality);
     this.atmosphere.sun.shadow.mapSize.set(
       this.quality.shadowMapSize,
@@ -405,7 +523,12 @@ export class Game {
       this.atmosphere.sun.shadow.map.dispose();
       this.atmosphere.sun.shadow.map = null;
     }
-    this.atmosphere.configureShadowFrustum(this.quality.shadowDistance);
+    this.atmosphere.configureShadowFrustum(
+      this.quality.shadowDistance,
+      this.atmosphere.state.sunDirection.y,
+    );
+    this.atmosphere.invalidateShadows();
+    this.weatherFx.applyQuality(this.quality);
     if (this.vegetation.grassMesh) {
       this.vegetation.grassMesh.visible = this.quality.grassEnabled;
     }
@@ -413,6 +536,66 @@ export class Game {
   }
 
   __vegetation = (): VegetationLayout => this.vegetationLayout;
+
+  __atmosphere = (): {
+    hour: number;
+    fraction: number;
+    phase: string;
+    darkness: number;
+    daylight: number;
+    moonlit: number;
+    weather: string;
+    weatherBlend: number;
+    rainIntensity: number;
+    cloudCover: number;
+    wetness: number;
+    sunIntensity: number;
+    ambientIntensity: number;
+    fogDensity: number;
+    exposure: number;
+    sunDir: { x: number; y: number; z: number };
+    shadowExtent: number;
+    rainDrops: number;
+    ambience: AmbienceMix;
+  } => ({
+    hour: this.dayNight.hour,
+    fraction: this.dayNight.fraction,
+    phase: this.dayNight.phaseName,
+    darkness: this.dayNight.darkness,
+    daylight: this.dayNight.daylight,
+    moonlit: this.dayNight.moonlit,
+    weather: weatherName(this.weather.dominant),
+    weatherBlend: this.weather.blend,
+    rainIntensity: this.weather.current.rainIntensity,
+    cloudCover: this.weather.current.cloudCover,
+    wetness: this.weather.current.wetness,
+    sunIntensity: this.atmosphere.state.sunIntensity,
+    ambientIntensity: this.atmosphere.state.ambientIntensity,
+    fogDensity: this.atmosphere.state.fogDensity,
+    exposure: this.exposure,
+    sunDir: {
+      x: this.atmosphere.state.sunDirection.x,
+      y: this.atmosphere.state.sunDirection.y,
+      z: this.atmosphere.state.sunDirection.z,
+    },
+    shadowExtent: this.atmosphere.shadowExtentCurrent,
+    rainDrops: this.weatherFx.activeDropCount,
+    ambience: { ...this.ambienceMix },
+  });
+
+  __setTimeOfDay = (hour: number): void => {
+    this.dayNight.setHour(hour);
+    this.applyAtmosphere(0);
+  };
+
+  __setWeather = (kind: 'clear' | 'cloudy' | 'rain', immediate = true): void => {
+    const k =
+      kind === 'clear' ? WeatherKind.Clear : kind === 'cloudy' ? WeatherKind.Cloudy : WeatherKind.Rain;
+    this.weather.setWeather(k, immediate);
+    this.applyAtmosphere(0);
+  };
+
+  __ambienceMix = (): AmbienceMix => ({ ...this.ambienceMix });
 
   /** Per-layer instance counts, for verifying vegetation culling coherence. */
   __vegetationCounts = (): number[] => {
@@ -452,6 +635,37 @@ export class Game {
   /** Per-zombie rig visibility, for flicker verification. */
   __zombieVisibility = (): [number, boolean][] => this.zombieRenderer.debugVisibility();
 
+  __zombieAnimation = (): { id: number; clip: string; weight: number; time: number }[] =>
+    this.zombieRenderer.debugAnimation();
+
+  __zombieCost = (): {
+    visibleRigs: number;
+    drawCalls: number;
+    triangles: number;
+    source: string;
+  } => {
+    let visibleRigs = 0;
+    let drawCalls = 0;
+    let triangles = 0;
+    for (const slot of this.zombieRenderer.group.children) {
+      if (!slot.visible) continue;
+      visibleRigs++;
+      slot.traverse((o) => {
+        const mesh = o as THREE.Mesh & { isMesh?: boolean; isSkinnedMesh?: boolean };
+        if (!mesh.isMesh && !mesh.isSkinnedMesh) return;
+        if (!mesh.visible) return;
+        drawCalls++;
+        const geo = mesh.geometry as THREE.BufferGeometry | undefined;
+        if (!geo) return;
+        const index = geo.getIndex();
+        const pos = geo.attributes.position;
+        if (index) triangles += index.count / 3;
+        else if (pos) triangles += pos.count / 3;
+      });
+    }
+    return { visibleRigs, drawCalls, triangles, source: this.zombieRenderer.sourceName };
+  };
+
   /** Camera orientation, for look-smoothness verification. */
   __look = (): { yaw: number; pitch: number } => ({
     yaw: this.player.yaw,
@@ -473,17 +687,14 @@ export class Game {
     dy: number,
     dz: number,
   ): ShotOutcome => {
-    return this.combat.fireHitscan(
-      this.weapons.current,
-      0,
-      ox,
-      oy,
-      oz,
-      dx,
-      dy,
-      dz,
-      this.shotOutcome,
-    );
+    const def = this.weapons.current;
+    if (def.kind === 'pellet') {
+      return this.combat.firePellets(def, 0, ox, oy, oz, dx, dy, dz, this.shotOutcome, 1);
+    }
+    if (def.kind === 'melee') {
+      return this.combat.meleeSwing(def, ox, oy, oz, dx, dy, dz, this.shotOutcome);
+    }
+    return this.combat.fireHitscan(def, 0, ox, oy, oz, dx, dy, dz, this.shotOutcome);
   };
 
   __test(): {
@@ -494,6 +705,10 @@ export class Game {
     forceLook(dx: number, dy: number): void;
     fireOnce(): void;
     terrain: Terrain;
+    inventory: Inventory;
+    medical: MedicalSystem;
+    useMedical(id: MedicalId): boolean;
+    setLoadout(loadout: Loadout): void;
   } {
     return {
       player: this.player,
@@ -507,7 +722,16 @@ export class Game {
         this.player.look(dx, dy);
       },
       fireOnce: () => {
-        this.weapons.forceFire((req, recoil) => this.handleShot(req.def, req.spread, recoil));
+        this.weapons.forceFire(
+          (req, recoil) => this.handleShot(req.def, req.spread, req.aimBlend, recoil),
+          { onMelee: (req) => this.handleMelee(req.def) },
+        );
+      },
+      inventory: this.inventory,
+      medical: this.medical,
+      useMedical: (id: MedicalId) => this.medical.begin(id, this.state.alive) === 'started',
+      setLoadout: (loadout: Loadout) => {
+        this.pendingLoadout = loadout;
       },
     };
   }
@@ -594,6 +818,18 @@ export class Game {
         this.intent.switchTo = scripted.switchTo;
         scripted.switchTo = null;
       }
+      if (scripted.cycleDir !== 0) {
+        this.intent.cycleDir = scripted.cycleDir;
+        scripted.cycleDir = 0;
+      }
+      if (scripted.useMedical) {
+        this.intent.useMedical = true;
+        scripted.useMedical = false;
+      }
+      if (scripted.useMedicalAlt) {
+        this.intent.useMedicalAlt = true;
+        scripted.useMedicalAlt = false;
+      }
     }
 
     this.latchEdges();
@@ -620,6 +856,10 @@ export class Game {
     }
     this.profiler.end('sim');
 
+    this.viewModel.setHealing(
+      this.state.medical.usingId !== null,
+      this.state.medical.progress,
+    );
     this.state.playerYaw = this.player.yaw;
     this.state.tickFeedback(dt);
     this.updatePresentation(dt);
@@ -641,25 +881,94 @@ export class Game {
     }
   }
 
+  private applyAtmosphere(dt: number): void {
+    this.grading.evaluate(this.dayNight, this.weather.current, this.atmosphere.state);
+    const g = this.grading.out;
+
+    this.atmosphere.zenith.copy(g.zenith);
+    this.atmosphere.horizon.copy(g.horizon);
+    this.atmosphere.groundColor.copy(g.ground);
+    this.atmosphere.haze = g.haze;
+    this.atmosphere.cloudCover = this.quality.skyCloudsEnabled ? g.cloudCover : 0;
+    this.atmosphere.starAmount = this.quality.starsEnabled
+      ? g.moonlit * (1 - g.cloudCover * 0.9)
+      : 0;
+    this.atmosphere.shadowStrength = g.shadowStrength;
+    this.atmosphere.ambient.color.copy(g.ambientSky);
+    this.atmosphere.ambient.groundColor.copy(g.ambientGround);
+    this.atmosphere.fill.intensity = 0.6 * (0.45 + 0.55 * this.dayNight.daylight);
+
+    if (dt > 0) {
+      this.atmosphere.cloudTime += dt;
+      this.exposure = damp(this.exposure, g.exposure, 2.5, dt);
+    } else {
+      this.exposure = g.exposure;
+    }
+    this.bundle.renderer.toneMappingExposure = this.exposure;
+
+    computeAmbienceMix(this.dayNight, this.weather, this.ambienceMix);
+
+    if (this.audio.ready) {
+      const reloadingNow = this.state.reloading;
+      if (reloadingNow !== this.lastReloading) {
+        if (reloadingNow) this.audio.reloadStarted();
+        else if (this.state.phase === GamePhase.Playing) this.audio.reloadFinished();
+        this.lastReloading = reloadingNow;
+      }
+      const eye = this.player.eye;
+      this.audio.updateListener({ x: eye.x, y: eye.y, z: eye.z, yaw: this.player.yaw });
+      this.audio.setAmbienceMix({
+        forest: 0,
+        night: 0,
+        rain: this.ambienceMix.ambienceRain,
+      });
+      if (this.state.phase === GamePhase.Playing) {
+        this.audio.tickFootsteps(
+          dt,
+          this.player.horizontalSpeed,
+          this.player.grounded,
+          this.state.sprinting,
+          this.state.crouching,
+        );
+        this.audio.tickZombieAmbience(dt, this.zombies.nearestAliveTo(eye.x, eye.z));
+      }
+    }
+  }
+
   private simulate(dt: number, playing: boolean): void {
     if (!playing) {
       this.noise.step(dt);
       return;
     }
 
+    this.dayNight.step(dt);
+    this.weather.step(dt);
+
     this.profiler.begin('player');
     this.player.step(dt, this.intent);
     this.enforcePlayerBounds();
     this.profiler.end('player');
 
-    if (this.intent.switchTo === 1) this.weapons.selectSlot(0);
-    else if (this.intent.switchTo === 2) this.weapons.selectSlot(1);
-    else if (this.intent.nextWeapon) this.weapons.cycle();
+    if (this.intent.switchTo !== null) this.weapons.selectSlot(this.intent.switchTo - 1);
+    else if (this.intent.nextWeapon) this.weapons.cycle(this.intent.cycleDir === -1 ? -1 : 1);
     this.viewModel.select(this.weapons.current.id);
 
     const canAct = this.state.alive;
-    this.weapons.step(dt, this.intent, canAct, (req, recoil) =>
-      this.handleShot(req.def, req.spread, recoil),
+
+    if (this.intent.useMedical) this.medical.beginBest(canAct);
+    else if (this.intent.useMedicalAlt) this.medical.begin('medkit', canAct);
+    this.medical.step(dt, canAct);
+
+    this.weapons.step(
+      dt,
+      this.intent,
+      canAct && !this.medical.busy,
+      (req, recoil) => this.handleShot(req.def, req.spread, req.aimBlend, recoil),
+      {
+        onMelee: (req) => this.handleMelee(req.def),
+        canSpendStamina: (amount) => this.player.canSpendStamina(amount),
+        spendStamina: (amount) => this.player.spendStamina(amount),
+      },
     );
 
     this.movementNoiseTimer -= dt;
@@ -714,6 +1023,9 @@ export class Game {
     if (this.intent.interact) e.interact = true;
     if (this.intent.nextWeapon) e.nextWeapon = true;
     if (this.intent.switchTo !== null) e.switchTo = this.intent.switchTo;
+    if (this.intent.cycleDir !== 0) e.cycleDir = this.intent.cycleDir;
+    if (this.intent.useMedical) e.useMedical = true;
+    if (this.intent.useMedicalAlt) e.useMedicalAlt = true;
   }
 
   /**
@@ -729,6 +1041,9 @@ export class Game {
       this.intent.interact = false;
       this.intent.nextWeapon = false;
       this.intent.switchTo = null;
+      this.intent.cycleDir = 0;
+      this.intent.useMedical = false;
+      this.intent.useMedicalAlt = false;
       return;
     }
     this.intent.jump = e.jump;
@@ -737,26 +1052,108 @@ export class Game {
     this.intent.interact = e.interact;
     this.intent.nextWeapon = e.nextWeapon;
     this.intent.switchTo = e.switchTo;
+    this.intent.cycleDir = e.cycleDir;
+    this.intent.useMedical = e.useMedical;
+    this.intent.useMedicalAlt = e.useMedicalAlt;
     e.jump = false;
     e.firePressed = false;
     e.reload = false;
     e.interact = false;
     e.nextWeapon = false;
     e.switchTo = null;
+    e.cycleDir = 0;
+    e.useMedical = false;
+    e.useMedicalAlt = false;
   }
 
   private handleShot(
     def: WeaponDef,
     spread: number,
+    aimBlend: number,
     recoil: { pitch: number; yaw: number },
   ): void {
     const eye = this.player.eye;
     this.tmpEuler.set(this.player.pitch, this.player.yaw, 0, 'YXZ');
     const dir = this.tmpVec.set(0, 0, -1).applyEuler(this.tmpEuler);
 
-    const outcome = this.combat.fireHitscan(
+    const outcome =
+      def.kind === 'pellet'
+        ? this.combat.firePellets(
+            def,
+            spread,
+            eye.x,
+            eye.y,
+            eye.z,
+            dir.x,
+            dir.y,
+            dir.z,
+            this.shotOutcome,
+            aimBlend,
+          )
+        : this.combat.fireHitscan(
+            def,
+            spread,
+            eye.x,
+            eye.y,
+            eye.z,
+            dir.x,
+            dir.y,
+            dir.z,
+            this.shotOutcome,
+          );
+
+    this.player.addRecoil(recoil.pitch, recoil.yaw);
+    this.viewModel.onFire();
+
+    const muzzle = this.viewModel
+      .getMuzzleViewPosition(this.tmpMuzzle)
+      .applyEuler(this.tmpEuler)
+      .add(eye);
+    if (outcome.pellets.length > 0) {
+      for (const pellet of outcome.pellets) {
+        this.effects.spawnTracer(
+          muzzle.x,
+          muzzle.y,
+          muzzle.z,
+          pellet.endX,
+          pellet.endY,
+          pellet.endZ,
+        );
+      }
+    } else {
+      this.effects.spawnTracer(
+        muzzle.x,
+        muzzle.y,
+        muzzle.z,
+        outcome.endX,
+        outcome.endY,
+        outcome.endZ,
+      );
+    }
+    for (const impact of outcome.impacts) this.effects.spawnImpact(impact);
+
+    this.audio.weaponFired(def.id);
+    const firstImpact = outcome.impacts[0];
+    if (firstImpact) this.audio.bulletImpact(firstImpact.x, firstImpact.y, firstImpact.z);
+
+    if (outcome.hitZombie) {
+      this.state.registerHit(outcome.kills > 0);
+      for (let i = 1; i < outcome.kills; i++) this.state.registerHit(true);
+      if (outcome.kills === 0 && firstImpact) {
+        this.audio.zombieHurt(firstImpact.x, firstImpact.y, firstImpact.z);
+      }
+    }
+
+    this.noise.emit(eye.x, eye.y, eye.z, def.noiseRadius, 1, 'gunshot', 0.7);
+  }
+
+  private handleMelee(def: WeaponDef): void {
+    const eye = this.player.eye;
+    this.tmpEuler.set(this.player.pitch, this.player.yaw, 0, 'YXZ');
+    const dir = this.tmpVec.set(0, 0, -1).applyEuler(this.tmpEuler);
+
+    const outcome = this.combat.meleeSwing(
       def,
-      spread,
       eye.x,
       eye.y,
       eye.z,
@@ -766,16 +1163,23 @@ export class Game {
       this.shotOutcome,
     );
 
-    this.player.addRecoil(recoil.pitch, recoil.yaw);
     this.viewModel.onFire();
-
-    const muzzle = this.viewModel.getMuzzleWorldPosition(this.tmpMuzzle);
-    this.effects.spawnTracer(muzzle.x, muzzle.y, muzzle.z, outcome.endX, outcome.endY, outcome.endZ);
     for (const impact of outcome.impacts) this.effects.spawnImpact(impact);
 
-    if (outcome.hitZombie) this.state.registerHit(outcome.killed);
-
-    this.noise.emit(eye.x, eye.y, eye.z, def.noiseRadius, 1, 'gunshot', 0.7);
+    this.audio.weaponFired('melee');
+    if (outcome.hitZombie) {
+      this.audio.meleeImpact(outcome.endX, outcome.endY, outcome.endZ);
+      this.state.registerHit(outcome.kills > 0);
+      this.noise.emit(
+        outcome.endX,
+        outcome.endY,
+        outcome.endZ,
+        def.noiseRadius,
+        0.5,
+        'impact',
+        0.5,
+      );
+    }
   }
 
   private updatePresentation(dt: number): void {
@@ -810,21 +1214,29 @@ export class Game {
         this.player.pitch + (0.22 - this.player.pitch) * buckle +
         (pitchTarget - 0.22) * fallEase;
 
-      // The roll lands late so the head tips over at the end of the fall.
       const rollEase = fallEase * fallEase;
-      // A small settle wobble as it comes to rest.
       const settle =
         fall > 0.75 ? Math.sin((fall - 0.75) * 26) * 0.035 * (1 - fall) * 4 : 0;
 
+      const impact = fall > 0.82 ? (fall - 0.82) / 0.18 : 0;
+      const thud = impact > 0 ? Math.sin(impact * Math.PI * 3) * 0.05 * (1 - impact) : 0;
+
+      const shudder =
+        fall > 0.9
+          ? Math.sin((this.clock.elapsed - this.deathStartElapsed) * 7.5) *
+            0.018 *
+            Math.max(0, 1 - (fall - 0.9) / 0.1)
+          : Math.sin((this.clock.elapsed - this.deathStartElapsed) * 3.1) * 0.012 * buckle;
+
       this.camera.position.set(
         eye.x + this.deathDriftX * fallEase,
-        camY,
+        camY + thud,
         eye.z + this.deathDriftZ * fallEase,
       );
       this.camera.rotation.set(
-        pitch,
+        pitch + shudder + thud * 1.6,
         this.player.yaw + this.deathYaw * fallEase,
-        this.player.viewOffset.roll + (this.deathRoll + settle) * rollEase,
+        this.player.viewOffset.roll + (this.deathRoll + settle + shudder * 0.8) * rollEase,
       );
     } else {
       this.camera.position.set(eye.x, eye.y, eye.z);
@@ -834,7 +1246,8 @@ export class Game {
 
     const aim = this.weapons.aimBlend;
     const sprintFov = this.player.sprinting ? 4 : 0;
-    this.cameraTargetFov = 72 - aim * 16 + sprintFov;
+    const deathFov = d > 0.001 ? -10 * (d * d) : 0;
+    this.cameraTargetFov = 72 - aim * 16 + sprintFov + deathFov;
     this.currentFov = damp(this.currentFov, this.cameraTargetFov, 12, dt);
     if (Math.abs(this.camera.fov - this.currentFov) > 0.01) {
       this.camera.fov = this.currentFov;
@@ -856,20 +1269,30 @@ export class Game {
     this.viewModel.group.visible = dcurve < 0.55;
 
     this.culler.update(this.camera.position.x, this.camera.position.z, dt);
-    // Zombies cast shadows inside a now-static frustum, so the shadow pass
-    // still has to re-run while any of them are close enough to matter.
+    this.applyAtmosphere(dt);
     this.atmosphere.update(
       this.scene,
       this.camera.position,
       this.quality.shadowDistance,
       this.zombies.activeCount > 0,
     );
+    this.weatherFx.update(
+      dt,
+      this.weather.current.rainIntensity,
+      this.camera.position,
+      this.atmosphere.state.ambientColor,
+      this.dayNight.daylight,
+    );
 
     const sun = this.atmosphere.state;
+    const moonlit = this.dayNight.moonlit;
     this.viewLights.key.color.copy(sun.sunColor);
-    this.viewLights.key.intensity = 1.15 + sun.sunIntensity * 0.34;
+    this.viewLights.key.intensity = Math.max(1.15 + sun.sunIntensity * 0.34, 1.15 + moonlit * 0.55);
     this.viewLights.ambient.color.copy(sun.ambientColor);
-    this.viewLights.ambient.intensity = 0.34 + sun.ambientIntensity * 0.5;
+    this.viewLights.ambient.intensity = Math.max(
+      0.34 + sun.ambientIntensity * 0.5,
+      0.34 + moonlit * 0.62,
+    );
     this.viewLights.key.position
       .copy(sun.sunDirection)
       .applyAxisAngle(new THREE.Vector3(0, 1, 0), -this.player.yaw);
@@ -938,6 +1361,7 @@ export class Game {
     this.vegetation?.dispose();
     this.props?.dispose();
     this.atmosphere?.dispose();
+    this.weatherFx?.dispose();
     this.terrainMesh?.geometry.dispose();
     (this.terrainMesh?.material as THREE.Material | undefined)?.dispose();
     this.physics?.dispose();

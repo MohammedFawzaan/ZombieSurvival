@@ -133,7 +133,7 @@ Never mark a feature complete solely because code compiles.
 - Keep assets replaceable.
 - Keep persistence modular.
 - Do not add multiplayer yet.
-- Do not add audio yet.
+- Audio is in scope for V1: minimal and purposeful only, no dynamic music system.
 - Do not add vehicles.
 - Do not add RPG levels.
 - Do not expand the world merely to make it bigger.

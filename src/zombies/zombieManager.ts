@@ -104,6 +104,8 @@ const BLOCK_PROBE_INTERVAL = 0.14;
 const PLAYER_STANDOFF = 0.14;
 const NEAR_DIST = 34;
 const MID_DIST = 78;
+const LOD_HYSTERESIS = 3;
+const DEATH_LINGER_SECONDS = 2.6;
 const ATTACK_LUNGE = 0.5;
 
 export interface ZombieManagerOptions {
@@ -459,7 +461,9 @@ export class ZombieManager {
       const dx = p.x - zp.x;
       const dz = p.z - zp.z;
       z.distToPlayer = Math.hypot(dx, dz);
-      z.lodTier = z.distToPlayer < NEAR_DIST ? 0 : z.distToPlayer < MID_DIST ? 1 : 2;
+      const nearLimit = z.lodTier === 0 ? NEAR_DIST + LOD_HYSTERESIS : NEAR_DIST;
+      const midLimit = z.lodTier <= 1 ? MID_DIST + LOD_HYSTERESIS : MID_DIST;
+      z.lodTier = z.distToPlayer < nearLimit ? 0 : z.distToPlayer < midLimit ? 1 : 2;
       if (z.hitFlash > 0) z.hitFlash = Math.max(0, z.hitFlash - dt * 3.4);
 
       if (z.distToPlayer > this.options.despawnDistance) {
@@ -482,10 +486,11 @@ export class ZombieManager {
       this.updateMovement(z, stepDt, shouldUpdate);
       this.updateAnimation(z, stepDt);
 
-      // Post-update transform. renderAlphaRate tells the renderer how fast to
-      // travel from prev to curr, so a LOD-1 zombie that moved three steps'
-      // worth of distance is blended over three steps of time.
       const np = z.body.position;
+      z.prevRenderX = z.currRenderX;
+      z.prevRenderY = z.currRenderY;
+      z.prevRenderZ = z.currRenderZ;
+      z.prevRenderYaw = z.currRenderYaw;
       z.currRenderX = np.x;
       z.currRenderY = np.y;
       z.currRenderZ = np.z;
@@ -981,6 +986,23 @@ export class ZombieManager {
     z.animPhase = (z.animPhase + z.animSpeed * dt) % TAU;
   }
 
+  nearestAliveTo(x: number, z: number): { x: number; y: number; z: number; dist: number } | null {
+    let best: Zombie | null = null;
+    let bestDist = Infinity;
+    for (const z2 of this.zombies) {
+      if (!z2.alive || !z2.body || z2.deathTimer > 0) continue;
+      const p = z2.body.position;
+      const d = Math.hypot(p.x - x, p.z - z);
+      if (d < bestDist) {
+        bestDist = d;
+        best = z2;
+      }
+    }
+    if (!best || !best.body) return null;
+    const p = best.body.position;
+    return { x: p.x, y: p.y, z: p.z, dist: bestDist };
+  }
+
   zombieByCollider(handle: number): Zombie | null {
     const id = this.colliderToZombie.get(handle);
     return id === undefined ? null : this.zombies[id];
@@ -1017,15 +1039,32 @@ export class ZombieManager {
     return false;
   }
 
+  forceStagger(z: Zombie, chance: number, dirX: number, dirZ: number): boolean {
+    if (!z.alive || z.state === ZombieState.Dead) return false;
+    const roll = chance * (1 - z.def.staggerResist * 0.6);
+    if (this.rng() >= roll) return false;
+    z.state = ZombieState.Staggered;
+    z.staggerTimer = randRange(0.42, 0.72) * (1 - z.def.staggerResist * 0.5);
+    z.attackCommitted = false;
+    z.attackTimer = 0;
+    z.speed *= 0.2;
+    if (z.body) {
+      z.body.velocity.x += dirX * 2.4;
+      z.body.velocity.z += dirZ * 2.4;
+    }
+    return true;
+  }
+
   private kill(z: Zombie): void {
     z.alive = false;
     z.state = ZombieState.Dead;
     z.speed = 0;
-    z.deathTimer = 6.5;
+    z.deathTimer = DEATH_LINGER_SECONDS;
     this.aliveCount--;
     if (z.body) {
       z.body.velocity.x = 0;
       z.body.velocity.z = 0;
+      z.body.disableCollision();
     }
     this.onZombieDied?.(z);
   }
