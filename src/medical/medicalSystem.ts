@@ -19,6 +19,9 @@ export class MedicalSystem {
   private readonly state: GameState;
   private readonly inventory: Inventory;
 
+  healSpeedMultiplier = 1;
+  healAmountMultiplier = 1;
+
   private activeId: MedicalId | null = null;
   private timer = 0;
   private duration = 0;
@@ -55,8 +58,9 @@ export class MedicalSystem {
     if (this.state.maxHealth - this.state.health < def.minHealthDeficit) return 'full-health';
 
     this.activeId = id;
-    this.duration = def.useTime;
-    this.timer = def.useTime;
+    const useTime = def.useTime * this.healSpeedMultiplier;
+    this.duration = useTime;
+    this.timer = useTime;
     this.syncState();
     this.onStarted?.(id);
     return 'started';
@@ -131,7 +135,7 @@ export class MedicalSystem {
     this.duration = 0;
 
     if (consumed) {
-      this.state.heal(def.heal);
+      this.state.heal(def.heal * this.healAmountMultiplier);
       this.onHealed?.(id, this.state.health - before);
     }
     this.syncState();

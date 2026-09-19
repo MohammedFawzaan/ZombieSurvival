@@ -26,7 +26,7 @@ app.whenReady().then(async () => {
     if (level === 3) pageErrors.push(message);
   });
 
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
 
   let result;
   try {

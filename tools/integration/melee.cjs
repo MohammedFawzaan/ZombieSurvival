@@ -6,7 +6,7 @@ app.disableDomainBlockingFor3DAPIs();
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: 1280, height: 720, show: true,
     webPreferences: { preload: path.join(root,'dist-electron/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } });
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
   win.focus();
   const r = await win.webContents.executeJavaScript(`(async () => {
     const out = { errors: [] };

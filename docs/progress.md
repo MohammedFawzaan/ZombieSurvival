@@ -813,3 +813,632 @@ instances run concurrently — GPU cache contention, visible as
 `Unable to create cache` / `Gpu Cache Creation failed` in the output. Run a
 suspect suite alone before treating its failure as real; `direction` passed on
 two consecutive solo runs immediately after failing in a contended batch.
+
+## V2 round-based systems (simulation half)
+
+The round mode is pure simulation under `src/rounds/`, `src/economy/`,
+`src/interactions/`, `src/progression/`, `src/perks/` and `src/rewards/`. None of
+it imports Three.js and none of it reads a wall clock: every timer advances off
+the `dt` handed to `step()`, so the fixed 60 Hz loop stays the only driver.
+
+### Why the round director owns spawning
+
+`ZombieManager.step()` keeps its own cooldown that tops the population back up to
+`targetActive`. In round mode that would fight the director and make a round
+impossible to finish, because fresh zombies would keep arriving after the round's
+quota was spent. Round mode therefore needs that auto-spawn suppressed (setting
+`targetActive` to 0 is enough) and drives population itself through a
+`RoundSpawnSink`. The LOD tiers, three-phase tick rotation and per-step ray
+budget are untouched — the director only decides *when* and *where* a spawn is
+requested, never how the AI is stepped.
+
+### A round ends on three conditions, not one
+
+`RoundManager` leaves `Active` only when the kill count has reached the round
+total, every zombie for the round has actually been spawned, and the live count
+is zero. Checking kills alone lets a round end while stragglers are still
+chasing the player; checking alive alone ends round 1 instantly, before the first
+spawn. All three are required.
+
+### Difficulty is population, not health bars
+
+The curve scales total count, max simultaneously alive, spawn interval and the
+walker/runner/brute mix. Health multiplier starts at 1.0 until round 4 and is
+capped at 2.1x, because the alternative — bullet-sponge zombies — makes every
+weapon feel broken. Walkers only for the first three rounds, runners phase in at
+round 4, brutes at round 8, and a "surge" round every fifth round from round 10
+raises max-alive and compresses the spawn interval instead of inflating health.
+
+### Determinism
+
+The spawn director and the reward table each own a seeded `makeRng` stream, so a
+seed reproduces both the spawn sequence and the reward rolls exactly. Neither
+calls the global `Math.random`, which is what `randRange` in `util/math` uses —
+mixing the two would have silently destroyed reproducibility.
+
+### One interaction path
+
+Every purchasable thing — barrier, wall weapon, wall ammo, perk machine, power
+switch, reward machine — is built into a single `Interactable[]` from the
+`MapConfig` and resolved by one `InteractionSystem`. It produces the single
+prompt string that feeds `GameState.interactHint`. Adding a new interactable kind
+means adding a case, not a new key handler and a new raycast.
+
+Note that a wall weapon produces *two* interactables sharing one anchor: the
+weapon buy and an `:ammo` suffixed entry. Availability switches between them
+(the weapon entry reports `already-owned` once bought), so the prompt naturally
+becomes an ammo prompt after purchase.
+
+### HudSnapshot additions are optional fields
+
+The round-mode fields on `HudSnapshot` (`roundPhase`, `points`, `perks` and the
+rest) are declared optional so the free-form forest mode's `GameState.snapshot()`
+compiles unchanged. They are absent, not zero, when round mode is not running.
+
+---
+
+## V2 integration: map architecture and wiring (2026-09-15)
+
+The V2 systems above and the city map were built against a shared contract and
+then wired into `Game` in one pass. This section records the integration
+decisions, because they are the part that is not derivable from either half.
+
+### The five-member ground contract is what made V2 an extension
+
+Before writing any V2 code, grepping `zombieManager.ts`, `player.ts` and
+`combat.ts` for `terrain.` showed that gameplay touches terrain through exactly
+five members: `half`, `heightAt`, `isInBounds`, `normalAt`, `slopeAt`. That is
+the entire coupling between the world and the simulation.
+
+`src/maps/groundSurface.ts` names that set as `GroundSurface`. `Terrain`
+satisfies it with **no changes at all**, and `CityGround` implements it
+independently. `PhysicsWorld.addTerrain`, `buildTerrainMesh` and `ZombieManager`
+now take `GroundSurface` rather than `Terrain`, so every verified V1 system —
+zombie AI, perception, obstacle avoidance, the character controller, hitscan —
+runs on the city with zero modification. `src/maps/groundSurface.test.ts` asserts
+both grounds satisfy it, and that the city interior stays under 0.35 rad slope.
+
+`road`/`distanceToRoad` are declared optional on the contract: the forest blends
+a dirt road into terrain vertex colours, the city has authored road meshes and
+wants no such blend. `buildTerrainMesh` skips the road term when they are absent.
+
+### Barrier collision is removed, not hidden
+
+The city builder returns `barrierMeshes` *and* `barrierColliders` (Rapier body
+handles) keyed by barrier id. Opening a door hides the mesh and calls a new
+`PhysicsWorld.removeBody(handle)`; `addStaticBox` now returns its handle to make
+that possible. Without this a purchased door would look open and still block the
+player — the exact fake-interaction failure the V2 brief forbids.
+
+`Game.restoreBarriers()` recreates the colliders on restart and on return to
+menu, since a restarted run must have its doors shut again.
+
+### Round mode is opt-in per map, so V1 cannot regress
+
+`MapConfig.roundBased` decides whether a `RoundMode` is constructed at all. The
+forest sets it false and keeps its V1 population behaviour (`populateInitial`
+plus the cooldown auto-spawn). The city sets it true, which constructs
+`RoundMode` and sets `targetActive: 0` so the V1 auto-spawn stops competing with
+the round director — without that, rounds can never complete because the old
+spawner keeps topping the population up.
+
+### Hooks added to verified systems
+
+Three, all additive:
+
+- `ZombieManager.spawnAtPoint(x, z, kind, healthMul, speedMul)` — a public
+  wrapper over the existing private `spawnAt`, so the director reuses the
+  verified spawn path rather than duplicating it. `roundSpeedMultiplier` is a new
+  per-zombie field applied once to `desiredSpeed`, and is reset in `spawnAt` so a
+  recycled late-round brute cannot leak its speed into a round-1 walker.
+- `Inventory.addWeapon(id)` — respects the real `maxFirearms`/`maxMelee` carry
+  limits rather than a single count.
+- `WeaponSystem.rebuildSlots()` — writes live magazine/reserve back into the
+  inventory *before* rebuilding, then restores the held weapon by id. The private
+  `buildSlots` resets `index` to 0, which would have yanked the player's weapon
+  out of their hands when they bought one mid-round.
+
+### Map switching recreates the Game
+
+Selecting a map in `MapSelectScreen` changes `mapId`, which the `App` init
+effect depends on, so the whole `Game` is disposed and rebuilt. Swapping a world
+in place on a live frame loop would mean partially-disposed physics and render
+state; a clean rebuild is slower but cannot produce that class of bug.
+
+### Harness note: smoke is flaky independent of V2
+
+`smoke` failed after the V2 wiring, which looked like a regression. Stashing
+every V2 change, rebuilding pristine V1 and re-running it reproduced a failure
+there too — with a *different* assertion ("headshot bonus too small: head 34.0 vs
+torso 34.0"). It fails on a different random check each run. Treat a smoke
+failure as evidence only after comparing against a stashed baseline.
+
+The batch-contention effect is also real and worse than documented: `obstacles`,
+`melee` and `flicker` all failed in one batch on a pristine tree and all passed
+individually. **Run integration suites one at a time on this hardware.**
+
+## Verifying the city map in a real build (`city` suite)
+
+`tools/integration/city.cjs` is the first suite that drives the round-based city
+map end to end. It asserts on authoritative simulation state only — points read
+from `GameState`, collider presence read from the Rapier world — never on HUD
+text, because a purchase toast proves nothing about whether the door opened.
+
+Three defects surfaced the first time it ran against a real build.
+
+### `forceIntent` never forwarded `interactHeld`
+
+The scripted-intent override in `Game.frame()` copies each input field onto the
+real intent individually, and `interactHeld` was missing from that list. Every
+interaction therefore became untestable through the harness: the prompt string
+appeared, the hold timer never advanced, and a barrier purchase silently did
+nothing. This was a gap in the test surface rather than in gameplay — a human
+holding E was always fine — but it meant no suite could ever have caught a fake
+purchase. Fixed by forwarding the field alongside the other held inputs.
+
+### The default map change broke every V1 suite
+
+V2 made `'city'` the default `mapId` in `App.tsx`. The V1 suites call
+`startNewRun()` against whatever map the UI happened to construct, so they began
+testing the city instead of the forest — `obstacles` failed with "no isolated
+tree found" because a city has no trees. The other forest suites were passing
+only by luck, exercising geometry they were never written for.
+
+The map is now selectable per-window through a `?map=` query parameter that
+`App.tsx` reads when seeding its initial `mapId` state. Every V1 suite loads with
+`{ query: { map: 'forest' } }` and `city.cjs` loads with `map=city`, so each
+suite states the map it means to test instead of inheriting a UI default. A
+suite that does not name a map still gets the city.
+
+### The scoring path is not the probe path
+
+`__probeShot()` calls `CombatSystem` directly and deliberately bypasses
+`handleShot()`, which is where `awardCombatPoints()` lives. A suite that kills
+zombies with `__probeShot` sees kills land and points stay flat, which looks
+exactly like a broken economy. Anything verifying points, match stats or round
+progression must fire through `fireOnce()`; `__probeShot` remains correct for
+deterministic hit-region geometry and nothing else.
+
+### Measured city numbers (Iris Xe, WebGL2)
+
+Sprinting a four-leg patrol with 9 zombies alive: median frame 16.7 ms, p99
+16.9 ms, 59 draw calls (max 67), 107 K triangles, 43 MB. Buckets: render
+1.61 ms, sim 0.39, player 0.26, physics 0.17, ai 0.13. The forest by comparison
+draws 79-174 calls and 540-772 K triangles, so the city is markedly cheaper —
+its static geometry is merged into a handful of batches, and it carries no
+vegetation. The bottleneck bucket on both maps is render, but the city has far
+more headroom.
+
+`pacing.cjs` prints `PACING_RESULT` and no `VERDICT:` line, so the runner reports
+it as `none` even when it passes. It is a pre-existing gap, not a city problem.
+
+## Perks were fake state until wired (2026-09-15)
+
+`PerkSystem` deliberately never mutates other systems — it exposes
+`reloadTime(base)`, `healAmount(base)`, `staminaDrain(base)` and so on for call
+sites to consume. Nothing consumed them. Buying a perk added a HUD badge,
+deducted points, and changed no gameplay value whatsoever: exactly the
+fake-state failure the V2 brief forbids, and invisible to a typecheck.
+
+Each effect now has one multiplier field on the system that owns the value,
+assigned in `Game.applyPerkEffects()` when a perk is acquired:
+
+- `WeaponSystem.reloadTimeMultiplier` — applied in `beginReload` **and** in
+  `reloadProgress`, which divides by the reload duration. Applying it only to
+  the timer would have left the progress bar starting part-filled.
+- `MedicalSystem.healSpeedMultiplier` / `healAmountMultiplier` — use time is set
+  into `duration` and `timer` together, so progress stays correct.
+- `Player.staminaMaxMultiplier` / `staminaRegenMultiplier` /
+  `staminaDrainMultiplier`, with `GameState.maxStamina` updated to match so the
+  bar and the simulation agree.
+- Max health raises `GameState.maxHealth` and grants the difference as current
+  health, so the perk is felt immediately rather than only after healing.
+
+`resetPerkEffects()` runs *before* `state.reset()` in both `startNewRun` and
+`returnToMenu`, because `reset()` restores health to `maxHealth` — clearing the
+perk afterwards would leave a health value above the base maximum.
+
+`src/perks/perkEffectsApplied.test.ts` guards this: it asserts every multiplier
+is neutral before purchase and moved in the right direction after, so a perk
+that stops reaching its call site fails a test rather than shipping silently.
+
+## Purchase systems verified, two real bugs found (2026-09-15)
+
+`tools/integration/purchases.cjs` (suite name `purchases`) covers what the `city`
+suite did not: wall weapons, wall ammo, the power switch, perk machines,
+duplicate-perk refusal, and reward machines. It asserts on authoritative state —
+inventory contents, reserve counts, `PowerSystem.on`, perk count, and the
+multiplier a perk is supposed to move — never on HUD text.
+
+Measured: machete wall buy deducts exactly 750 and the weapon reaches the
+inventory and the weapon slots (`slotCount` 1 -> 2); pistol ammo deducts 250 and
+raises reserve 0 -> 150; the breaker flips sim, HUD and stats together; Steady
+Hands deducts 2000, is owned once, and moves `WeaponSystem.reloadTimeMultiplier`
+from 1 to 0.6; a duplicate purchase is refused and charges 0; the reward machine
+deducts exactly 950 and records a roll.
+
+### Bug: ammo could never be bought at a wall buy
+
+A wall weapon builds *two* interactables at one anchor — the weapon and an
+`:ammo` entry — with identical position and range. The selection loop scored them
+identically and `score > bestScore` kept the first one seen, which is always the
+weapon. Once the weapon was owned the prompt read "OWNED" and there was no way to
+reach the ammo entry, so a player standing at a wall buy with an empty reserve
+could not buy ammo at all.
+
+`pickTarget` now adds a fixed bonus to an interactable whose availability is
+`Ok`, so a non-actionable sibling yields to an actionable one at the same anchor.
+An `Insufficient` target still wins over nothing, so the "NEED MORE POINTS"
+prompt is preserved.
+
+### Bug: an owned wall weapon read "OPEN"
+
+The `AlreadyOwned` prompt branch fell through to the barrier wording. A weapon
+you already carry now reads "— OWNED".
+
+### Test-surface note
+
+The default loadout carries every weapon, so the first version of this suite
+exercised only the already-owned path and proved nothing about purchasing. The
+suite now forces a pistol-only loadout through `__test().setLoadout()` before
+`startNewRun()`. A purchase test against a full loadout is not a purchase test.
+
+## Multi-round progression and game-over verified (2026-09-15)
+
+`tools/integration/rounds.cjs` (suite `rounds`) plays five consecutive rounds in
+a real build, then kills the player and restarts.
+
+Measured across rounds 1-5: totals **6, 9, 13, 17, 22**; maxAlive 8 -> 11;
+health multiplier only 1.00 -> 1.05 while speed moves 1.00 -> 1.04. That is the
+intended shape — difficulty comes from population and pressure, not from health
+inflation. 67 kills and 10,835 points earned over the five rounds.
+
+Restart from the results screen fully resets: round 1, 500 points, 100 health, 0
+perks, power off, and barrier colliders restored.
+
+### Bug: game-over never reached the HUD
+
+`GameState.damage()` sets the `Dead` phase and `handlePhaseChange` calls
+`RoundMode.rounds.gameOver()`, which does set `RoundPhase.GameOver`. But
+`Game.simulate()` returns early when not playing, so `stepRoundMode()` — the only
+caller of `syncRoundHud()` — stops running the moment the player dies. The HUD
+kept whatever `roundPhase` it last saw, which in testing was `round-starting`.
+
+The simulation was right and the presentation was stale: exactly the class of
+divergence the V2 brief calls fake state. `handlePhaseChange` now calls
+`syncRoundHud()` and `state.emit()` immediately after `gameOver()`.
+
+Worth noting the suite is what caught this — the round system's own unit tests
+pass, because the defect lives in the wiring between a correct simulation and a
+correct HUD, which only a running build exercises.
+
+## City ambience and the power hum (2026-09-15)
+
+The city played on the forest's ambience bed, which was wrong for an abandoned
+district. Two new synthesised loops, in the existing no-sample-files style:
+
+- **`cityLoop`** (8 s) — wind channelled between buildings: filtered noise under
+  two independent gust envelopes, plus 14 low structural groans (120-310 Hz with
+  a slow wobble) and 9 short high metallic tings scattered through the buffer.
+  Band-limited 55-430 Hz so it reads as empty and exposed rather than busy.
+- **`powerHumLoop`** (4 s) — mains hum at 100 Hz with 200 Hz and 300 Hz
+  harmonics, a slow 0.09 Hz frequency drift so it never sounds like a pure tone,
+  and a little crackle.
+
+Both use the existing `crossfadeLoop` so the seam does not click.
+
+`AmbienceMix` gains `ambienceCity` and `ambiencePowerHum`, and
+`computeAmbienceMix` takes an optional `AmbienceContext` (`urban`, `powerOn`).
+The forest path is byte-identical when no context is passed — there is a test
+asserting exactly that, since the forest bed is shipped behaviour.
+
+The power hum is absent until `PowerSystem.on`, and is only ever non-zero on an
+urban map, so activating the breaker fades a mains hum into the world. It moves
+through the existing ambience gain path, which ramps rather than steps.
+
+Verified: 389 unit tests pass including three new mix tests (city bed replaces
+forest bed, hum silent until power, forest unchanged without context), and the
+`launch` suite reports zero page errors — which is what proves the new buffers
+actually synthesise at startup, since a bad `build()` only fails at runtime.
+
+**Not verified: nobody has listened to these.** The synthesis is numerically
+sound and loops without a click by construction, but whether the city bed
+actually *feels* like an abandoned district needs a human ear.
+
+## City visual pass, and the spawn that faced the wrong way (2026-09-15)
+
+The city is no longer a blockout. `cityDetail.ts` adds vertex-colour weathering
+(mottle, grime that rises from the ground, streaking down walls), `cityStreet.ts`
+builds road/kerb/pavement surfaces with markings and patches, `cityLights.ts`
+carries the street and building lights, and the building shells gained door
+recesses, window frames, boarding, fire escapes and signage. Props are still
+instanced kits; static geometry is still merged per material.
+
+`paintStreet` paints one merged street buffer in three vertex ranges — asphalt,
+kerb, pavement — each with its own wear and moss creeping in at the edges. The
+ranges are addressed by vertex count because the three surfaces are merged into
+a single draw.
+
+Measured in a real build: **79 draw calls median (was 59), 188K triangles (was
+107K), median frame 16.7 ms, p99 17.0 ms, worst 17.2 ms, 0 spikes.** The cost is
+real but the budget holds; the forest for comparison is 79-174 draw calls and
+540-772K triangles.
+
+Note for future measurement: the **first** city run after a rebuild reported 21.9
+FPS, and every run after it reported 94-96 FPS on the same build. That is cold
+shader compilation, not a regression. Do not trust the first run after `npm run
+build`.
+
+### Bug: the player spawned facing out of the map
+
+`CITY_MAP.playerSpawn.yaw` was `Math.PI`. Camera forward is
+`(-sin yaw, -cos yaw)`, so `Math.PI` points at **+Z** — and the entire city is
+built toward **-Z** (market at z=-10, apartments z=-50, substation z=-104). The
+player therefore spawned at the southern edge looking at the empty boundary
+embankment with the whole district behind them. Now `yaw: 0`.
+
+Nothing caught this: every suite sets its own yaw before moving, the layout tests
+only check positions, and the map's own report described the yaw as "facing
+north". It was only visible by capturing a frame and looking at it.
+
+### The boundary rim
+
+`buildTerrainMesh` painted the city ground with the forest palette — saturated
+grass greens, and detail textures tiled for a 420 m world — which at 300 m made
+the boundary rim read as a noisy green wall. The function now takes a
+`TerrainPalette`, defaulting to `FOREST_PALETTE` so the forest is untouched, and
+the city passes `URBAN_PALETTE`: desaturated, browner, with the detail repeat
+scaled to 0.42.
+
+### New suite: cityshots
+
+`tools/integration/cityshots.cjs` (suite `cityshots`, excluded from a bare run
+like the other capture suites) writes frames to `screenshots/city/` along the
+street, through the market, the apartments, the depot and substation, then again
+with every barrier open and the power on. This is how the two bugs above were
+found; neither was reachable from an assertion.
+
+## V2 completion pass (2026-09-15)
+
+### Blender city assets
+
+`tools/blender/export_assets.py` gained `city_car`, `city_dumpster`, `city_lamp`,
+`city_hydrant` and `city_barricade`, exported with Blender 5.2 to
+`assets/models/city_*.glb`. `src/maps/city/cityAssets.ts` loads them through
+`GLTFLoader`, flattens each scene into a single merged geometry (world transforms
+baked, attributes reduced to position/normal/uv so instancing is cheap) and
+`buildCity` uses them where present, falling back to the procedural kit per prop
+kind. `Game.cityAssetsLoaded` reports how many resolved, and the `city` suite
+fails if it is not 5 — so a silent fallback to procedural geometry cannot ship
+unnoticed.
+
+Cost of the swap: draw calls unchanged at 79, triangles 188K -> 191K.
+
+### Bug: four barriers were rotated 90 degrees wrong
+
+`bar_start_market`, `bar_market_apartments`, `bar_apartments_depot` and
+`bar_apartments_substation` all carried `yaw: Math.PI / 2`, which ran them
+*along* the route they were meant to gate instead of across it. The mesh and the
+collider share that yaw, so both were wrong together — the barrier was a narrow
+column beside the road, and the player could walk straight past it into a locked
+zone without paying.
+
+The `city` suite did not catch it because the only barrier it exercised,
+`bar_start_west`, was one of the two already correct.
+
+Found by capturing a frame and looking at it: the barrier rendered as a
+screen-filling wedge when the camera stood at its position.
+
+`tools/integration/barriers.cjs` (suite `barriers`) now walks every barrier in
+the map from 6 m back, along the barrier's own normal, while locked and again
+while open. Measured after the fix: all 8 stop the player short (crossed -0.6 m)
+when locked and let them 10-15 m through when open.
+
+### Zombies verified on the city
+
+`zombieart` takes `ZS_MAP=city` and now waits for the round director to spawn
+rather than assuming the forest's immediate population. On the city: source
+`glb-skinned`, 3 draw calls and 6,437 triangles per rig, **0 frozen animation
+samples**, clips transitioning. The forest still reports 17 rigs and passes.
+
+### Harness note: a starved window reports ~22 FPS
+
+The `city` suite twice reported "average FPS below 50: 21.9" with
+`medianFrameMs: 0`, `worstFrameMs: null` and an empty rAF sample array, while the
+profiler buckets in the same run totalled ~2.5 ms of actual work (sim 0.36,
+physics 0.15, ai 0.13, render 1.68). That is an occluded or unfocused harness
+window, not the engine. It happens when the suite runs immediately after another
+Electron window (for example `cityshots`). Re-running it alone gave 117.9 FPS,
+median 16.7 ms, p99 17.0 ms.
+
+Treat an FPS failure with an empty `rafTimes` as an environment artefact and
+re-run before believing it.
+
+## npm start showed a black screen: ELECTRON_RUN_AS_NODE (2026-09-15)
+
+Reported symptom: `npm start` opened a black window; `npm run dev` was fine.
+
+Root cause: `ELECTRON_RUN_AS_NODE=1` was set in the launching shell. That flag
+makes the `electron` binary run as plain Node, so `require('electron')` yields an
+object with no APIs — `protocol` is `undefined` and `main.cjs` throws
+`TypeError: Cannot read properties of undefined (reading
+'registerSchemesAsPrivileged')` before a window is ever created.
+
+`npm run dev` was unaffected because the dev path loads `http://localhost:5273`
+and never calls `protocol.handle`, which is the production-only `app://` scheme.
+
+Every integration suite passed throughout, because `tools/integration/run.mjs`
+already does `delete env.ELECTRON_RUN_AS_NODE` before spawning Electron. The
+harness was immune to the exact condition that broke the real launch — worth
+remembering: a suite that sanitises the environment cannot detect an environment
+bug.
+
+Two fixes:
+
+- `tools/launch.mjs` spawns Electron with `ELECTRON_RUN_AS_NODE` **deleted** from
+  the child environment, and `npm start` / `npm run dev:electron` go through it.
+  `cross-env ELECTRON_RUN_AS_NODE= ...` is NOT sufficient — it sets the variable
+  to an empty string, which Electron still treats as set.
+- `electron/main.ts` now checks `app`/`protocol` at startup and exits with an
+  explanatory message naming the variable and the per-shell command to clear it,
+  so this fails loudly instead of as a black window.
+
+Verified with `ELECTRON_RUN_AS_NODE=1` exported: `npm start` runs clean, no load
+errors, and `prodlaunch` reports `app://index.html/`, phase `menu`, zero console
+errors.
+
+## The ELECTRON_RUN_AS_NODE fix was never actually wired in (2026-09-15, V2)
+
+The previous entry ("npm start showed a black screen: ELECTRON_RUN_AS_NODE")
+diagnosed the cause correctly and wrote `tools/launch.mjs` to strip the
+variable before spawning Electron, but `package.json`'s `start` and
+`dev:electron` scripts still called `electron .` directly. The wrapper script
+existed and was correct; nothing ever called it. The bug was reported as fixed
+and reappeared in V2 because it had never actually gone away.
+
+Fixed by pointing both scripts at the wrapper:
+
+- `start`: `npm run build && cross-env NODE_ENV=production node tools/launch.mjs`
+- `dev:electron`: `... && cross-env NODE_ENV=development node tools/launch.mjs`
+
+Verified by running `npm start` in a shell with `ELECTRON_RUN_AS_NODE=1`
+exported (the exact broken condition) end to end: the build completes, Electron
+launches without the `TypeError` on `protocol`, and a real window process
+starts. Lesson for next time a "fix" is reported: check that the thing calling
+the fixed code path is the thing the user actually runs, not just that the
+fixed code path itself is correct.
+
+## Electron black screen despite working DOM/game state: risky GPU flags (2026-09-15)
+
+Reported again after the ELECTRON_RUN_AS_NODE fix landed: `npm start` opened a
+black window while `npm run dev` (browser) worked fine. Diagnosing directly
+against the real `dist-electron/main.cjs` entry point showed the JS layer was
+completely healthy every time — `window.game` created, phase reached `menu`,
+canvas present with correct dimensions, zero console errors — but repeated runs
+in a constrained sandbox showed the underlying Chromium GPU process crashing
+intermittently (`GPU process exited unexpectedly`, `Network service crashed`)
+on some launches and not others, with no JS-visible symptom. A black window
+with a fully working app underneath it is the signature of the *compositor*
+failing to paint, not the app failing to run.
+
+`electron/main.ts` was force-enabling GPU features the app never uses:
+`enable-unsafe-webgpu`, `enable-features Vulkan,WebGPU,UseSkiaRenderer`. The
+renderer factory hard-disables the WebGPU path in code
+(`preference === 'auto' && false` in `rendererFactory.ts`) and always falls
+back to plain `WebGLRenderer` — so those flags bought nothing and were pure
+risk, forcing Vulkan and an experimental compositor (`UseSkiaRenderer`) on
+Intel integrated graphics where that combination is a known source of GPU
+process instability. `enable-gpu-rasterization` / `enable-zero-copy` were
+force-overriding Chromium's own hardware-suitability decisions for this
+specific GPU, which is the same class of risk.
+
+Fixed:
+- Removed all three flags above.
+- Added `ignore-gpu-blocklist` instead, which is the correct switch for the
+  actual failure mode this causes on older/less-common Intel iGPUs: Chromium's
+  built-in blocklist disabling hardware acceleration entirely for a GPU it
+  doesn't recognise, which *would* produce exactly this symptom deterministically
+  rather than intermittently.
+- Added `render-process-gone` and `unresponsive` handlers that reload the
+  window automatically, so a GPU-process crash mid-session recovers instead of
+  leaving a permanently black window that requires killing the app.
+
+Verified: 4/4 consecutive launches against the real production entry point came
+back with a visible window, correct canvas size, `WebGLRenderer` active, and
+zero console errors — previously this same harness had shown the GPU process
+crash intermittently in the same environment. Full suite still 387/387.
+
+## Collapsed to a single dev-only launch path (2026-09-16)
+
+After the ELECTRON_RUN_AS_NODE fix and the GPU-flag cleanup, the user hit a new
+failure where *both* `npm start` and the browser dev server appeared broken at
+once. Diagnosing directly against a real Electron window loading the live
+dev server showed the actual app was completely healthy — `window.game`
+present, menu rendering, zero console errors. The cause was environmental:
+dozens of stale Electron/Node/Vite processes had accumulated from repeated
+test launches during the previous debugging sessions, including one still
+bound to port 5273. Killing them (`taskkill /F /IM electron.exe`,
+`taskkill /F /IM node.exe`) resolved it immediately, no code change needed for
+that part.
+
+Given two black-screen incidents in a row traced to the production-only load
+path (`app://` custom protocol, `NODE_ENV` branching in `electron/main.ts`),
+the user asked to stop maintaining two launch paths and keep development only.
+
+`electron/main.ts` no longer branches on `isDev`: it always loads
+`http://localhost:5273` (the Vite dev server) and always opens DevTools. The
+custom `app://` protocol, `protocol.registerSchemesAsPrivileged`, and the
+`registerAppProtocol()` handler are gone — there is no code path left that
+depends on `dist/index.html` or a `file://`/custom-scheme load, which is what
+both black-screen incidents traced back to.
+
+`package.json`: `start` is now `npm run dev` verbatim (Vite + Electron against
+it, via `concurrently`). `build`, `build:renderer`, `test:integration`,
+`test:all` and `screenshots` are kept as separate, explicitly-invoked commands
+for the integration harness in `tools/integration/`, which still needs a
+`dist/` build to run its 24 suites against — those are opt-in verification
+tools now, not part of the everyday launch flow, and are not implicated in
+either black-screen incident.
+
+Verified: clean process state, `npm start` end-to-end (Vite ready, Electron
+built and launched, window process confirmed alive with expected memory
+footprint for main+renderer+GPU+utility processes), and a direct connection to
+the live dev server confirming `window.game` initializes and the app
+progresses through its loading sequence. Full unit suite still 387/387.
+
+## Black screen on load with a saved non-dynamic time-of-day setting (2026-09-17)
+
+Real crash, reproduced and fixed — not environmental. `err.logs` showed:
+
+```
+Uncaught TypeError: Cannot read properties of undefined (reading 'state')
+    at Game.applyAtmosphere (game.ts:1153:80)
+    at Game.applyTimePreference (game.ts:619:10)
+    at App.tsx:91:12
+    at SettingsStore.subscribe (settings.ts:133:5)
+```
+
+`SettingsStore.subscribe()` calls its listener synchronously and immediately
+with the current value, by design (`settings.ts`), so it fires the instant
+`App.tsx` subscribes to it — which happens right after `new Game(...)` but
+before the async `game.init()` has run. If the user's saved settings have
+`graphics.timeOfDay` set to anything other than `'dynamic'` (i.e. they had
+picked `morning`/`day`/`evening`/`night` in a previous session), that listener
+calls `game.applyTimePreference(...)`, which calls `applyAtmosphere(0)`
+directly, which dereferences `this.atmosphere.state` — but `this.atmosphere`
+is only constructed partway through `init()` (`this.atmosphere = new
+Atmosphere(...)` at line 288). Every load with such a saved setting threw
+synchronously, React unmounted `<App>`, and the page went blank — with the
+title bar and window otherwise present, exactly a "black screen."
+
+`applyWeatherPreference` was already safe: it only touches `this.weather`, a
+plain field initialized at class-construction time, not inside `init()`.
+`applyAtmosphere` was the one unguarded call.
+
+Fixed with a one-line readiness guard:
+
+```ts
+private applyAtmosphere(dt: number): void {
+  if (!this.atmosphere) return;
+  ...
+```
+
+The preference is not lost by returning early: `dayNight.setHour()` /
+`dayNight.paused` are still set before the early return, `init()` calls
+`applyAtmosphere(0)` again right after constructing `this.atmosphere` (line
+292), and every simulation frame calls it again after that (line 1604) — so
+the chosen time of day applies within one frame of the scene actually
+existing.
+
+Verified by reproducing directly: pre-seeded `localStorage` with
+`timeOfDay: 'night'` and reloaded a live window against the dev server.
+Reverting the guard reproduced the exact reported error and an empty `#root`;
+restoring it loaded clean. Swept all 16 combinations of the four time-of-day
+values and four weather values with the guard in place — all load cleanly.
+Full suite still 387/387.
+
+Lesson for next time a settings-driven preference is wired into `Game`: any
+method called from `SettingsStore.subscribe()` runs before `init()` has
+necessarily done anything, because the store fires its listener synchronously
+on subscribe, not on the next tick. Guard on the specific object being touched
+being constructed, not just on `this.disposed`/`this.headless`-style flags.

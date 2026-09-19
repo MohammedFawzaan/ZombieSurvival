@@ -45,6 +45,42 @@ const CONTROLS = (
 
 export type QualityChoice = 'low' | 'medium' | 'high';
 
+export const MapSelectScreen = memo(function MapSelectScreen({
+  onSelect,
+  onBack,
+}: {
+  onSelect: (id: 'forest' | 'city') => void;
+  onBack: () => void;
+}) {
+  return (
+    <div className="screen overlay--interactive">
+      <p className="screen__eyebrow">Select deployment</p>
+      <h1 className="screen__title">Choose your ground</h1>
+      <div className="screen__rule" />
+      <div className="map-grid">
+        <button className="map-card" onClick={() => onSelect('city')} autoFocus>
+          <span className="map-card__tag">Round-based</span>
+          <span className="map-card__name">Ravenhill District</span>
+          <span className="map-card__desc">
+            An abandoned residential block. Survive waves, earn points, buy your way deeper
+            into the city.
+          </span>
+        </button>
+        <button className="map-card" onClick={() => onSelect('forest')}>
+          <span className="map-card__tag">Free-form</span>
+          <span className="map-card__name">Blackpine Forest</span>
+          <span className="map-card__desc">
+            The original bounded forest. Open survival against a roaming population.
+          </span>
+        </button>
+      </div>
+      <button className="link-btn" onClick={onBack}>
+        Back
+      </button>
+    </div>
+  );
+});
+
 export const StartScreen = memo(function StartScreen({
   onStart,
   onSettings,
@@ -56,9 +92,9 @@ export const StartScreen = memo(function StartScreen({
 }) {
   return (
     <div className="screen overlay--interactive">
-      <p className="screen__eyebrow">Version 1</p>
+      <p className="screen__eyebrow">Version 2</p>
       <h1 className="screen__title">Zombie Survival</h1>
-      <p className="screen__subtitle">Survive the forest</p>
+      <p className="screen__subtitle">Outlast the dead</p>
       <div className="screen__rule" />
       <div className="btn-row">
         <button className="btn" onClick={onStart} autoFocus>

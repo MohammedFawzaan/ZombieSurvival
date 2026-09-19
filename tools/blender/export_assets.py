@@ -854,6 +854,141 @@ def build_zombie():
         build_zombie_variant(name, spec)
 
 
+def build_city_car():
+    reset_scene()
+    paint = make_material("CarPaint", (0.22, 0.24, 0.27), roughness=0.55, metallic=0.5)
+    glass = make_material("CarGlass", (0.10, 0.13, 0.15), roughness=0.22, metallic=0.1)
+    rubber = make_material("Tyre", (0.05, 0.05, 0.06), roughness=0.95, metallic=0.0)
+
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0.62))
+    body = bpy.context.active_object
+    body.name = "CarBody"
+    body.scale = (2.05, 0.86, 0.36)
+    body.data.materials.append(paint)
+
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(-0.16, 0, 1.12))
+    cabin = bpy.context.active_object
+    cabin.name = "CarCabin"
+    cabin.scale = (1.06, 0.78, 0.34)
+    cabin.data.materials.append(glass)
+
+    wheels = []
+    for i, (x, y) in enumerate([(1.32, 0.86), (1.32, -0.86), (-1.3, 0.86), (-1.3, -0.86)]):
+        bpy.ops.mesh.primitive_cylinder_add(
+            vertices=14, radius=0.33, depth=0.24, rotation=(1.5708, 0, 0), location=(x, y, 0.33)
+        )
+        w = bpy.context.active_object
+        w.name = f"Wheel{i}"
+        w.data.materials.append(rubber)
+        shade_smooth(w, 40)
+        wheels.append(w)
+
+    export_glb([body, cabin] + wheels, "city_car.glb")
+
+
+def build_city_dumpster():
+    reset_scene()
+    steel = make_material("DumpsterSteel", (0.16, 0.26, 0.20), roughness=0.72, metallic=0.45)
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0.62))
+    body = bpy.context.active_object
+    body.name = "DumpsterBody"
+    body.scale = (1.9, 1.05, 1.15)
+    body.data.materials.append(steel)
+
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 1.24))
+    lid = bpy.context.active_object
+    lid.name = "DumpsterLid"
+    lid.scale = (1.96, 1.12, 0.1)
+    lid.rotation_euler = (0, 0.06, 0)
+    lid.data.materials.append(steel)
+
+    export_glb([body, lid], "city_dumpster.glb")
+
+
+def build_city_lamp():
+    reset_scene()
+    metal = make_material("LampMetal", (0.13, 0.14, 0.15), roughness=0.55, metallic=0.75)
+    lens = make_material("LampLens", (0.85, 0.82, 0.68), roughness=0.3, metallic=0.0)
+
+    bpy.ops.mesh.primitive_cylinder_add(vertices=10, radius=0.09, depth=5.4, location=(0, 0, 2.7))
+    post = bpy.context.active_object
+    post.name = "LampPost"
+    post.data.materials.append(metal)
+    shade_smooth(post, 40)
+
+    bpy.ops.mesh.primitive_cylinder_add(
+        vertices=10, radius=0.07, depth=1.25, rotation=(0, 1.5708, 0), location=(0.55, 0, 5.32)
+    )
+    arm = bpy.context.active_object
+    arm.name = "LampArm"
+    arm.data.materials.append(metal)
+    shade_smooth(arm, 40)
+
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(1.12, 0, 5.2))
+    head = bpy.context.active_object
+    head.name = "LampHead"
+    head.scale = (0.52, 0.26, 0.14)
+    head.data.materials.append(lens)
+
+    export_glb([post, arm, head], "city_lamp.glb")
+
+
+def build_city_hydrant():
+    reset_scene()
+    paint = make_material("HydrantPaint", (0.52, 0.07, 0.06), roughness=0.62, metallic=0.2)
+    bpy.ops.mesh.primitive_cylinder_add(vertices=12, radius=0.17, depth=0.62, location=(0, 0, 0.31))
+    body = bpy.context.active_object
+    body.name = "HydrantBody"
+    body.data.materials.append(paint)
+    shade_smooth(body, 40)
+
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=12, ring_count=7, radius=0.17, location=(0, 0, 0.64))
+    cap = bpy.context.active_object
+    cap.name = "HydrantCap"
+    cap.scale = (1, 1, 0.62)
+    cap.data.materials.append(paint)
+    shade_smooth(cap, 40)
+
+    arms = []
+    for i, ry in enumerate([1.5708, -1.5708]):
+        bpy.ops.mesh.primitive_cylinder_add(
+            vertices=8, radius=0.07, depth=0.34, rotation=(0, 1.5708, 0), location=(0, 0, 0.42)
+        )
+        a = bpy.context.active_object
+        a.name = f"HydrantArm{i}"
+        a.rotation_euler = (0, 1.5708, ry)
+        a.data.materials.append(paint)
+        arms.append(a)
+
+    export_glb([body, cap] + arms, "city_hydrant.glb")
+
+
+def build_city_barricade():
+    reset_scene()
+    wood = make_material("BarricadeWood", (0.42, 0.30, 0.18), roughness=0.92, metallic=0.0)
+    stripe = make_material("BarricadeStripe", (0.62, 0.30, 0.06), roughness=0.85, metallic=0.0)
+
+    planks = []
+    for i, z in enumerate([0.42, 0.78]):
+        bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, z))
+        p = bpy.context.active_object
+        p.name = f"BarricadePlank{i}"
+        p.scale = (1.4, 0.06, 0.13)
+        p.data.materials.append(stripe if i == 0 else wood)
+        planks.append(p)
+
+    legs = []
+    for i, x in enumerate([-1.24, 1.24]):
+        bpy.ops.mesh.primitive_cube_add(size=1, location=(x, 0, 0.5))
+        l = bpy.context.active_object
+        l.name = f"BarricadeLeg{i}"
+        l.scale = (0.08, 0.34, 1.0)
+        l.data.materials.append(wood)
+        legs.append(l)
+
+    export_glb(planks + legs, "city_barricade.glb")
+
+
 BUILDERS = {
     "tree_conifer": build_conifer,
     "tree_broadleaf": build_broadleaf,
@@ -861,6 +996,11 @@ BUILDERS = {
     "bush": build_bush,
     "barrel": build_barrel,
     "zombie": build_zombie,
+    "city_car": build_city_car,
+    "city_dumpster": build_city_dumpster,
+    "city_lamp": build_city_lamp,
+    "city_hydrant": build_city_hydrant,
+    "city_barricade": build_city_barricade,
 }
 
 

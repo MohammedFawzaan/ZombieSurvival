@@ -267,6 +267,12 @@ export const SOUND_IDS = {
   ambienceForest: 'ambienceForest',
   ambienceNight: 'ambienceNight',
   ambienceRain: 'ambienceRain',
+  roundStart: 'roundStart',
+  roundComplete: 'roundComplete',
+  purchaseSuccess: 'purchaseSuccess',
+  purchaseDenied: 'purchaseDenied',
+  barrierOpened: 'barrierOpened',
+  powerOn: 'powerOn',
 } as const;
 
 export const SOUND_BANK: Record<string, SoundDef> = {
@@ -459,6 +465,129 @@ export const SOUND_BANK: Record<string, SoundDef> = {
   [SOUND_IDS.ambienceForest]: { bus: 'ambience', gain: 0.9, build: forestLoop },
   [SOUND_IDS.ambienceNight]: { bus: 'ambience', gain: 0.9, build: nightLoop },
   [SOUND_IDS.ambienceRain]: { bus: 'ambience', gain: 0.16, build: rainLoop },
+
+  [SOUND_IDS.roundStart]: {
+    bus: 'effects',
+    gain: 0.5,
+    maxVoices: 1,
+    build: (ctx) => {
+      const buf = makeBuffer(ctx, 1.6);
+      const d = buf.getChannelData(0);
+      const sr = buf.sampleRate;
+      for (let i = 0; i < d.length; i++) {
+        const t = i / sr;
+        const env = attack(t, 18) * decay(t, 1.4);
+        const swell = Math.sin(2 * Math.PI * 58 * t) * 0.6 + Math.sin(2 * Math.PI * 87 * t) * 0.3;
+        const air = (Math.random() * 2 - 1) * 0.25 * decay(t, 3.2);
+        d[i] = (swell + air) * env;
+      }
+      lowpass(d, 900, sr);
+      normalize(d, 0.62);
+      return buf;
+    },
+  },
+
+  [SOUND_IDS.roundComplete]: {
+    bus: 'effects',
+    gain: 0.46,
+    maxVoices: 1,
+    build: (ctx) => {
+      const buf = makeBuffer(ctx, 1.2);
+      const d = buf.getChannelData(0);
+      const sr = buf.sampleRate;
+      for (let i = 0; i < d.length; i++) {
+        const t = i / sr;
+        const env = attack(t, 10) * decay(t, 2.4);
+        const a = Math.sin(2 * Math.PI * 294 * t) * 0.4;
+        const b = Math.sin(2 * Math.PI * 392 * t) * 0.32 * (t > 0.18 ? 1 : 0);
+        d[i] = (a + b) * env;
+      }
+      lowpass(d, 3200, sr);
+      normalize(d, 0.55);
+      return buf;
+    },
+  },
+
+  [SOUND_IDS.purchaseSuccess]: {
+    bus: 'effects',
+    gain: 0.4,
+    maxVoices: 2,
+    build: (ctx) => {
+      const buf = makeBuffer(ctx, 0.36);
+      const d = buf.getChannelData(0);
+      const sr = buf.sampleRate;
+      for (let i = 0; i < d.length; i++) {
+        const t = i / sr;
+        const env = attack(t, 4) * decay(t, 9);
+        const step = t < 0.09 ? 523 : 784;
+        d[i] = Math.sin(2 * Math.PI * step * t) * env * 0.6;
+      }
+      normalize(d, 0.5);
+      return buf;
+    },
+  },
+
+  [SOUND_IDS.purchaseDenied]: {
+    bus: 'effects',
+    gain: 0.36,
+    maxVoices: 2,
+    build: (ctx) => {
+      const buf = makeBuffer(ctx, 0.28);
+      const d = buf.getChannelData(0);
+      const sr = buf.sampleRate;
+      for (let i = 0; i < d.length; i++) {
+        const t = i / sr;
+        const env = attack(t, 4) * decay(t, 12);
+        d[i] = Math.sin(2 * Math.PI * 146 * t) * env * 0.7;
+      }
+      lowpass(d, 1400, sr);
+      normalize(d, 0.45);
+      return buf;
+    },
+  },
+
+  [SOUND_IDS.barrierOpened]: {
+    bus: 'effects',
+    gain: 0.5,
+    maxVoices: 2,
+    build: (ctx) => {
+      const buf = makeBuffer(ctx, 1.1);
+      const d = buf.getChannelData(0);
+      const sr = buf.sampleRate;
+      for (let i = 0; i < d.length; i++) {
+        const t = i / sr;
+        const env = attack(t, 8) * decay(t, 2.8);
+        const scrape = (Math.random() * 2 - 1) * 0.8;
+        const groan = Math.sin(2 * Math.PI * (72 + t * 26) * t) * 0.35;
+        d[i] = (scrape * 0.5 + groan) * env;
+      }
+      lowpass(d, 1800, sr);
+      highpass(d, 90, sr);
+      normalize(d, 0.55);
+      return buf;
+    },
+  },
+
+  [SOUND_IDS.powerOn]: {
+    bus: 'effects',
+    gain: 0.58,
+    maxVoices: 1,
+    build: (ctx) => {
+      const buf = makeBuffer(ctx, 2.2);
+      const d = buf.getChannelData(0);
+      const sr = buf.sampleRate;
+      for (let i = 0; i < d.length; i++) {
+        const t = i / sr;
+        const thunk = decay(t, 18) * Math.sin(2 * Math.PI * 62 * t) * 0.9;
+        const hum = t > 0.12 ? Math.sin(2 * Math.PI * 120 * t) * 0.3 * Math.min(1, (t - 0.12) * 3) * decay(t, 0.9) : 0;
+        const spark = (Math.random() * 2 - 1) * 0.4 * decay(t, 14);
+        d[i] = thunk + hum + spark;
+      }
+      lowpass(d, 2600, sr);
+      normalize(d, 0.66);
+      return buf;
+    },
+  },
 };
 
 export function registerAllSounds(engine: {

@@ -13,7 +13,7 @@ app.whenReady().then(async () => {
     webPreferences:{ preload: path.join(root,'dist-electron/preload.cjs'),
       contextIsolation:true, nodeIntegration:false, sandbox:false, backgroundThrottling:false }});
   win.webContents.on('console-message',(_e,level,message)=>{logs.push('['+(level===3?'error':'log')+'] '+message);});
-  await win.loadFile(path.join(root,'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
   win.focus();
   const run=(c)=>win.webContents.executeJavaScript(c,true);
   const wait=(ms)=>new Promise(r=>setTimeout(r,ms));

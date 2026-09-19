@@ -10,6 +10,7 @@ export interface InputIntent {
   aim: boolean;
   reload: boolean;
   interact: boolean;
+  interactHeld: boolean;
   switchTo: 1 | 2 | 3 | 4 | null;
   cycleDir: 1 | -1 | 0;
   useMedical: boolean;
@@ -298,6 +299,7 @@ export class InputSystem {
     out.crouch = held('crouch') === 1;
     out.reload = on && this.pressed.has('reload');
     out.interact = on && this.pressed.has('interact');
+    out.interactHeld = held('interact') === 1;
     out.nextWeapon = on && (this.pressed.has('nextWeapon') || this.wheel !== 0);
     out.cycleDir = on && this.wheel !== 0 ? (this.wheel > 0 ? 1 : -1) : 0;
     out.switchTo = !on
@@ -343,6 +345,7 @@ export class InputSystem {
       aim: false,
       reload: false,
       interact: false,
+      interactHeld: false,
       switchTo: null,
       cycleDir: 0,
       useMedical: false,

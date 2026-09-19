@@ -30,7 +30,8 @@ app.whenReady().then(async () => {
     pageErrors.push('render process gone: ' + JSON.stringify(d));
   });
 
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  const targetMap = process.env.ZS_MAP === 'city' ? 'city' : 'forest';
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: targetMap } });
 
   let result;
   try {
@@ -47,6 +48,11 @@ app.whenReady().then(async () => {
         g.headless = true;
         g.startNewRun();
 
+        const spawnDeadline = Date.now() + 45000;
+        while (g.__test().zombies.aliveCount === 0 && Date.now() < spawnDeadline) {
+          g.__pump(performance.now());
+          await wait(8);
+        }
         for (let i = 0; i < 240; i++) { g.__pump(performance.now()); await wait(8); }
 
         const cost = g.__zombieCost();

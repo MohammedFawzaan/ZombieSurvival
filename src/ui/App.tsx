@@ -5,6 +5,7 @@ import { Hud } from './Hud';
 import {
   DebugOverlay,
   LoadingScreen,
+  MapSelectScreen,
   PauseScreen,
   StartScreen,
   type QualityChoice,
@@ -13,6 +14,7 @@ import { LoadoutScreen, ResultsScreen } from './LoadoutScreen';
 import { SettingsScreen } from './SettingsScreen';
 import { SettingsStore, type Settings } from '../settings/settings';
 import { defaultLoadout, type Loadout } from '../inventory/loadout';
+import type { MapId } from '../maps/mapTypes';
 
 declare global {
   interface Window {
@@ -25,7 +27,7 @@ declare global {
   }
 }
 
-type Overlay = 'none' | 'loadout' | 'settings';
+type Overlay = 'none' | 'mapselect' | 'loadout' | 'settings';
 
 export function App(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -45,16 +47,22 @@ export function App(): JSX.Element {
   const [settings, setSettings] = useState<Settings>(settingsRef.current.value);
   const [overlay, setOverlay] = useState<Overlay>('none');
   const [loadout, setLoadout] = useState<Loadout>(() => defaultLoadout());
+  const [mapId, setMapId] = useState<MapId>(() => {
+    const requested = new URLSearchParams(window.location.search).get('map');
+    return requested === 'forest' || requested === 'city' ? requested : 'city';
+  });
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     let disposed = false;
 
+    setLoading(true);
     const store = settingsRef.current!;
     const game = new Game(canvas, {
       quality: store.value.graphics.quality,
       rendererPreference: 'auto',
+      map: mapId,
     });
     gameRef.current = game;
     window.game = game;
@@ -106,7 +114,7 @@ export function App(): JSX.Element {
       gameRef.current = null;
       delete window.game;
     };
-  }, []);
+  }, [mapId]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -135,7 +143,15 @@ export function App(): JSX.Element {
     [],
   );
 
-  const handleOpenLoadout = useCallback(() => setOverlay('loadout'), []);
+  const handleOpenMapSelect = useCallback(() => setOverlay('mapselect'), []);
+
+  const handleSelectMap = useCallback(
+    (id: MapId) => {
+      setMapId(id);
+      setOverlay('loadout');
+    },
+    [],
+  );
 
   const handleDeploy = useCallback(() => {
     const game = gameRef.current;
@@ -202,10 +218,14 @@ export function App(): JSX.Element {
 
       {!loading && phase === GamePhase.Menu && overlay === 'none' && (
         <StartScreen
-          onStart={handleOpenLoadout}
+          onStart={handleOpenMapSelect}
           onSettings={() => setOverlay('settings')}
           onExit={handleExit}
         />
+      )}
+
+      {!loading && overlay === 'mapselect' && (
+        <MapSelectScreen onSelect={handleSelectMap} onBack={() => setOverlay('none')} />
       )}
 
       {!loading && overlay === 'loadout' && (
@@ -241,6 +261,7 @@ export function App(): JSX.Element {
         <ResultsScreen
           kills={snap.kills}
           survivedSeconds={snap.survivedSeconds}
+          stats={gameRef.current?.matchStats ?? null}
           onRestart={handleRestart}
           onMenu={handleMenu}
         />

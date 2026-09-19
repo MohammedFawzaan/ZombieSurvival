@@ -58,6 +58,18 @@ export class Inventory {
     return this.weaponList.some((w) => w.id === id);
   }
 
+  addWeapon(id: WeaponId): boolean {
+    const def = WEAPONS[id];
+    if (!def) return false;
+    if (this.hasWeapon(id)) return false;
+    const melee = def.kind === 'melee';
+    const held = this.weaponList.filter((w) => (WEAPONS[w.id].kind === 'melee') === melee).length;
+    if (held >= (melee ? CARRY.maxMelee : CARRY.maxFirearms)) return false;
+    const reserve = usesAmmo(def) ? Math.min(def.maxReserve, def.startingReserve) : 0;
+    this.weaponList.push({ id, magazine: def.magazineSize, reserve });
+    return true;
+  }
+
   weaponEntry(id: WeaponId): WeaponEntry | null {
     return this.weaponList.find((w) => w.id === id) ?? null;
   }

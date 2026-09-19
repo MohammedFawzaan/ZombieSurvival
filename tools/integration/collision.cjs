@@ -25,7 +25,7 @@ app.whenReady().then(async () => {
   win.webContents.on('console-message', (_e, level, message) => {
     logs.push(`[${level === 3 ? 'error' : 'log'}] ${message}`);
   });
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
   win.focus();
 
   const script = `

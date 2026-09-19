@@ -27,7 +27,7 @@ app.whenReady().then(async () => {
       sandbox: false,
     },
   });
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
 
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 

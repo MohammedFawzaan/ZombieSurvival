@@ -207,6 +207,18 @@ describe('ambience mix', () => {
     expect(night.ambienceNight).toBeGreaterThan(night.ambienceForest);
   });
 
+  it('leaves forest behaviour unchanged when no context is supplied', () => {
+    const cycle = new DayNightCycle();
+    cycle.setFraction(0.5);
+    const w = settled({ start: WeatherKind.Clear });
+
+    const implicit = computeAmbienceMix(cycle, w);
+    const explicit = computeAmbienceMix(cycle, w, undefined, { urban: false });
+    expect(implicit.ambienceForest).toBe(explicit.ambienceForest);
+    expect(implicit.ambienceNight).toBe(explicit.ambienceNight);
+    expect(implicit.ambienceRain).toBe(explicit.ambienceRain);
+  });
+
   it('ducks the bed under heavy rain and keeps all gains in range', () => {
     const cycle = new DayNightCycle();
     cycle.setFraction(0.5);

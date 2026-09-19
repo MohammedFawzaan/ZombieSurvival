@@ -1,6 +1,6 @@
 import type { PhysicsWorld } from '../physics/physics';
 import { CharacterBody } from '../physics/character';
-import type { Terrain } from '../world/terrain';
+import type { GroundSurface } from '../maps/groundSurface';
 import type { Player } from '../player/player';
 import type { GameState } from '../state/gameState';
 import type { NoiseSystem } from '../world/noiseEvents';
@@ -44,6 +44,7 @@ export interface Zombie {
   animSpeed: number;
   hitFlash: number;
   distToPlayer: number;
+  roundSpeedMultiplier: number;
   lodTier: 0 | 1 | 2;
   updateOffset: number;
   searchTimer: number;
@@ -95,16 +96,17 @@ export interface HitResult {
   damage: number;
 }
 
-const MAX_ZOMBIES = 44;
-const RAY_BUDGET_PER_STEP = 26;
+const MAX_ZOMBIES = 96;
+const RAY_BUDGET_PER_STEP = 34;
 const LOS_INTERVAL_NEAR = 0.18;
 const LOS_INTERVAL_MID = 0.45;
 const AVOID_INTERVAL = 0.25;
 const BLOCK_PROBE_INTERVAL = 0.14;
 const PLAYER_STANDOFF = 0.14;
-const NEAR_DIST = 34;
-const MID_DIST = 78;
+const NEAR_DIST = 26;
+const MID_DIST = 60;
 const LOD_HYSTERESIS = 3;
+const SPAWN_SEPARATION_SQ = 1.6 * 1.6;
 const DEATH_LINGER_SECONDS = 2.6;
 const ATTACK_LUNGE = 0.5;
 
@@ -127,7 +129,7 @@ export const DEFAULT_ZOMBIE_OPTIONS: ZombieManagerOptions = {
 export class ZombieManager {
   readonly zombies: Zombie[] = [];
   private readonly physics: PhysicsWorld;
-  private readonly terrain: Terrain;
+  private readonly terrain: GroundSurface;
   private readonly player: Player;
   private readonly state: GameState;
   private readonly noise: NoiseSystem;
@@ -147,7 +149,7 @@ export class ZombieManager {
 
   constructor(
     physics: PhysicsWorld,
-    terrain: Terrain,
+    terrain: GroundSurface,
     player: Player,
     state: GameState,
     noise: NoiseSystem,
@@ -216,6 +218,7 @@ export class ZombieManager {
       animSpeed: 1,
       hitFlash: 0,
       distToPlayer: 9999,
+      roundSpeedMultiplier: 1,
       lodTier: 2,
       updateOffset: id % 3,
       searchTimer: 0,
@@ -324,6 +327,32 @@ export class ZombieManager {
     return slot;
   }
 
+  spawnAtPoint(
+    x: number,
+    z: number,
+    kind: ZombieKind,
+    healthMultiplier = 1,
+    speedMultiplier = 1,
+  ): boolean {
+    const slot = this.findFreeSlot();
+    if (!slot) return false;
+    if (!this.terrain.isInBounds(x, z, 4)) return false;
+
+    for (const other of this.zombies) {
+      if (!other.alive || !other.body) continue;
+      const op = other.body.position;
+      const ox = op.x - x;
+      const oz = op.z - z;
+      if (ox * ox + oz * oz < SPAWN_SEPARATION_SQ) return false;
+    }
+
+    this.spawnAt(slot, kind, x, z);
+    slot.maxHealth = slot.def.health * healthMultiplier;
+    slot.health = slot.maxHealth;
+    slot.roundSpeedMultiplier = speedMultiplier;
+    return true;
+  }
+
   private spawnAt(z: Zombie, kind: ZombieKind, x: number, worldZ: number): void {
     const def = ZOMBIES[kind];
     const groundY = this.terrain.heightAt(x, worldZ);
@@ -335,6 +364,7 @@ export class ZombieManager {
     z.alive = true;
     z.health = def.health;
     z.maxHealth = def.health;
+    z.roundSpeedMultiplier = 1;
     z.state = ZombieState.Wandering;
     z.yaw = this.rng() * TAU;
     z.targetYaw = z.yaw;
@@ -810,6 +840,8 @@ export class ZombieManager {
         desiredSpeed = Math.max(desiredSpeed, def.walkSpeed);
       }
     }
+
+    desiredSpeed *= z.roundSpeedMultiplier;
 
     if (desiredSpeed > 0) {
       z.targetYaw = Math.atan2(-dirX, -dirZ);

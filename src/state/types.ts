@@ -18,6 +18,33 @@ export const enum ZombieState {
   Dead = 'dead',
 }
 
+export const enum RoundPhase {
+  Ready = 'ready',
+  RoundStarting = 'round-starting',
+  Active = 'active',
+  RoundComplete = 'round-complete',
+  Intermission = 'intermission',
+  GameOver = 'game-over',
+}
+
+export const enum InteractKind {
+  Barrier = 'barrier',
+  WallWeapon = 'wall-weapon',
+  WallAmmo = 'wall-ammo',
+  PerkMachine = 'perk-machine',
+  PowerSwitch = 'power-switch',
+  RewardMachine = 'reward-machine',
+}
+
+export const enum PurchaseResult {
+  Ok = 'ok',
+  Insufficient = 'insufficient',
+  Unavailable = 'unavailable',
+  AlreadyOwned = 'already-owned',
+  NeedsPower = 'needs-power',
+  Full = 'full',
+}
+
 export const enum HitRegion {
   Head = 'head',
   Torso = 'torso',
@@ -88,6 +115,16 @@ export interface HudSnapshot {
   killMarker: number;
   lowHealth: boolean;
   interactHint: string | null;
+  purchaseMessage?: string | null;
+  roundMode?: boolean;
+  roundPhase?: RoundPhase;
+  roundNumber?: number;
+  roundZombiesRemaining?: number;
+  roundCountdown?: number;
+  points?: number;
+  pointsPopup?: { amount: number; life: number } | null;
+  powerOn?: boolean;
+  perks?: { id: string; name: string; short: string; color: number }[];
   /** Damage directions RELATIVE to the player's facing, in radians. */
   damageDirs: { angle: number; strength: number; life: number }[];
 }

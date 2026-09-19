@@ -1,5 +1,5 @@
 import RAPIER from '@dimforge/rapier3d-compat';
-import type { Terrain } from '../world/terrain';
+import type { GroundSurface } from '../maps/groundSurface';
 import { FIXED_DT } from '../core/clock';
 
 export type Rapier = typeof RAPIER;
@@ -67,7 +67,7 @@ export class PhysicsWorld {
     this.world.step();
   }
 
-  addTerrain(terrain: Terrain): void {
+  addTerrain(terrain: GroundSurface): void {
     const { gridSize, heights, config } = terrain;
 
     const data = new Float32Array(gridSize * gridSize);
@@ -152,7 +152,7 @@ export class PhysicsWorld {
     hy: number,
     hz: number,
     yaw = 0,
-  ): void {
+  ): number {
     const half = yaw * 0.5;
     const body = this.world.createRigidBody(
       this.rapier.RigidBodyDesc.fixed()
@@ -164,6 +164,16 @@ export class PhysicsWorld {
       body,
     );
     this.propBodies.push(body);
+    return body.handle;
+  }
+
+  removeBody(handle: number): boolean {
+    const body = this.world.getRigidBody(handle);
+    if (!body) return false;
+    const index = this.propBodies.indexOf(body);
+    if (index >= 0) this.propBodies.splice(index, 1);
+    this.world.removeRigidBody(body);
+    return true;
   }
 
   raycast(

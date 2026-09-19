@@ -23,7 +23,7 @@ import { WeaponSystem } from '../weapons/weaponSystem';
 import { Inventory } from '../inventory/inventory';
 import { defaultLoadout, type Loadout } from '../inventory/loadout';
 import { MedicalSystem } from '../medical/medicalSystem';
-import type { MedicalId } from '../state/types';
+import type { MedicalId, WeaponId } from '../state/types';
 import type { WeaponDef } from '../weapons/definitions';
 import { createRenderer, type RendererBundle, type RendererPreference } from '../render/rendererFactory';
 import { QUALITY_PRESETS, applyQuality, type QualitySettings } from '../render/renderer';
@@ -32,14 +32,25 @@ import { AtmosphereGrading } from '../render/atmosphereGrading';
 import { WeatherFx } from '../render/weatherFx';
 import { DayNightCycle } from '../time/dayNight';
 import { WeatherSystem, WeatherKind, weatherName } from '../weather/weather';
-import { computeAmbienceMix, type AmbienceMix } from '../weather/ambienceMix';
-import { buildTerrainMesh } from '../render/terrainMesh';
+import { computeAmbienceMix, createAmbienceMix, type AmbienceMix } from '../weather/ambienceMix';
+import { buildTerrainMesh, URBAN_PALETTE } from '../render/terrainMesh';
 import { ZombieRenderer } from '../render/zombieRenderer';
 import { loadZombieAssets } from '../render/zombieAssets';
 import { AudioBridge } from '../audio/audioBridge';
 import { ViewModel } from '../render/viewModel';
 import { EffectsSystem } from '../render/effects';
 import { clamp, damp } from '../util/math';
+import type { MapConfig, MapId } from '../maps/mapTypes';
+import type { GroundSurface } from '../maps/groundSurface';
+import { FOREST_MAP } from '../maps/forest/forestConfig';
+import { CITY_MAP } from '../maps/city/cityConfig';
+import { CityGround } from '../maps/city/cityGround';
+import { buildCity, type CityBuildResult } from '../maps/city/cityBuilder';
+import { loadCityAssets, type CityAssetSet } from '../maps/city/cityAssets';
+import { RoundMode } from '../rounds/roundMode';
+import { HitRegion, PurchaseResult } from '../state/types';
+import type { SpawnRequest } from '../rounds/spawnDirector';
+import type { MatchStatsSnapshot } from '../rounds/matchStats';
 
 export type QualityLevel = 'low' | 'medium' | 'high';
 
@@ -48,15 +59,19 @@ export interface GameOptions {
   rendererPreference: RendererPreference;
   seed: number;
   skinnedZombies: boolean;
+  map: MapId;
 }
 
 const VIEWMODEL_FOV = 58;
+const BASE_MAX_HEALTH = 100;
+const BASE_MAX_STAMINA = 100;
 
 const DEFAULT_OPTIONS: GameOptions = {
   quality: 'medium',
   rendererPreference: 'auto',
   seed: DEFAULT_TERRAIN.seed,
   skinnedZombies: true,
+  map: 'forest',
 };
 
 export class Game {
@@ -92,19 +107,20 @@ export class Game {
   private readonly grading = new AtmosphereGrading();
   readonly dayNight = new DayNightCycle();
   readonly weather = new WeatherSystem();
-  private readonly ambienceMix: AmbienceMix = {
-    ambienceForest: 0,
-    ambienceNight: 0,
-    ambienceRain: 0,
-  };
+  private readonly ambienceMix: AmbienceMix = createAmbienceMix();
 
   private physics!: PhysicsWorld;
   private terrain!: Terrain;
+  private ground!: GroundSurface;
+  private mapConfig: MapConfig = FOREST_MAP;
+  private city: CityBuildResult | null = null;
+  private cityAssetCount = 0;
   private vegetationLayout!: VegetationLayout;
   private vegetation!: VegetationRenderResult;
   private props!: PropsResult;
   private culler = new VegetationCuller();
   private terrainMesh!: THREE.Mesh;
+  private roundMode: RoundMode | null = null;
 
   private player!: Player;
   private zombies!: ZombieManager;
@@ -214,28 +230,59 @@ export class Game {
     const rapier = await initRapier();
     this.physics = new PhysicsWorld(rapier);
 
+    const isCity = this.options.map === 'city';
+    this.mapConfig = isCity ? CITY_MAP : FOREST_MAP;
+
     progress('Generating terrain', 0.3);
-    this.terrain = new Terrain({ ...DEFAULT_TERRAIN, seed: this.options.seed });
-    this.physics.addTerrain(this.terrain);
-    this.physics.addWorldBounds(this.terrain.half - 6, 160);
-    const terrainBuild = buildTerrainMesh(this.terrain, this.quality.anisotropy);
-    this.terrainMesh = terrainBuild.mesh;
-    this.scene.add(this.terrainMesh);
+    if (isCity) {
+      const cityGround = new CityGround();
+      this.ground = cityGround;
+      this.physics.addTerrain(cityGround);
+      this.physics.addWorldBounds(cityGround.half - 6, 60);
+      const cityMeshBuild = buildTerrainMesh(cityGround, this.quality.anisotropy, URBAN_PALETTE);
+      this.terrainMesh = cityMeshBuild.mesh;
+      this.scene.add(this.terrainMesh);
 
-    progress('Growing forest', 0.5);
-    this.vegetationLayout = generateVegetation(
-      this.terrain,
-      this.quality.vegetationDensity,
-      this.options.seed ^ 0x77,
-    );
-    registerVegetationColliders(this.physics, this.vegetationLayout);
-    this.vegetation = buildVegetationMeshes(this.vegetationLayout, this.quality.grassEnabled);
-    for (const layer of this.vegetation.cullLayers) this.culler.add(layer);
-    this.scene.add(this.vegetation.group);
+      progress('Raising the city', 0.5);
+      let cityAssets: CityAssetSet | undefined;
+      try {
+        cityAssets = await loadCityAssets();
+      } catch (err) {
+        console.warn('city GLB load failed, using procedural props', err);
+      }
+      this.cityAssetCount = cityAssets ? Object.keys(cityAssets).length : 0;
+      this.city = buildCity(cityGround, this.physics, cityAssets);
+      this.scene.add(this.city.group);
 
-    progress('Placing landmarks', 0.65);
-    this.props = buildProps(this.terrain, this.physics, this.options.seed ^ 0xabc);
-    this.scene.add(this.props.group);
+      this.vegetationLayout = { trees: [], bushes: [], rocks: [], grass: [], clearings: [] };
+      this.vegetation = buildVegetationMeshes(this.vegetationLayout, false);
+      this.scene.add(this.vegetation.group);
+      this.props = { group: new THREE.Group(), landmarks: this.city.landmarks, dispose: () => {} };
+      this.scene.add(this.props.group);
+    } else {
+      this.terrain = new Terrain({ ...DEFAULT_TERRAIN, seed: this.options.seed });
+      this.ground = this.terrain;
+      this.physics.addTerrain(this.terrain);
+      this.physics.addWorldBounds(this.terrain.half - 6, 160);
+      const terrainBuild = buildTerrainMesh(this.terrain, this.quality.anisotropy);
+      this.terrainMesh = terrainBuild.mesh;
+      this.scene.add(this.terrainMesh);
+
+      progress('Growing forest', 0.5);
+      this.vegetationLayout = generateVegetation(
+        this.terrain,
+        this.quality.vegetationDensity,
+        this.options.seed ^ 0x77,
+      );
+      registerVegetationColliders(this.physics, this.vegetationLayout);
+      this.vegetation = buildVegetationMeshes(this.vegetationLayout, this.quality.grassEnabled);
+      for (const layer of this.vegetation.cullLayers) this.culler.add(layer);
+      this.scene.add(this.vegetation.group);
+
+      progress('Placing landmarks', 0.65);
+      this.props = buildProps(this.terrain, this.physics, this.options.seed ^ 0xabc);
+      this.scene.add(this.props.group);
+    }
 
     progress('Lighting world', 0.75);
     this.atmosphere = new Atmosphere(this.quality.shadowMapSize, this.quality.shadowDistance);
@@ -256,7 +303,7 @@ export class Game {
     progress('Releasing the dead', 0.92);
     this.zombies = new ZombieManager(
       this.physics,
-      this.terrain,
+      this.ground,
       this.player,
       this.state,
       this.noise,
@@ -279,6 +326,8 @@ export class Game {
         this.audio.zombieDied(p.x, p.y - z.body.feetOffset, p.z);
       }
     };
+
+    if (this.mapConfig.roundBased) this.initRoundMode();
 
     this.zombieRenderer = new ZombieRenderer();
     this.scene.add(this.zombieRenderer.group);
@@ -337,7 +386,130 @@ export class Game {
     this.start();
   }
 
+  private initRoundMode(): void {
+    const zombies = this.zombies;
+    const mode = new RoundMode({
+      rewardSeed: this.options.seed ^ 0x9a17,
+      spawn: { seed: this.options.seed ^ 0x2b1d },
+    });
+
+    this.zombies.setOptions({ targetActive: 0 });
+
+    mode.load(
+      this.mapConfig,
+      this.inventory,
+      {
+        spawnAtPoint: (req: SpawnRequest) =>
+          this.zombies.spawnAtPoint(
+            req.x,
+            req.z,
+            req.kind,
+            req.healthMultiplier,
+            req.speedMultiplier,
+          ),
+        get aliveCount(): number {
+          return zombies.aliveCount;
+        },
+      },
+      {
+        grantWeapon: (id) => {
+          if (!this.inventory.addWeapon(id)) return false;
+          this.weapons.rebuildSlots();
+          this.viewModel.select(this.weapons.current.id);
+          return true;
+        },
+      },
+    );
+
+    mode.events = {
+      onBarrierOpened: (barrierId) => this.openBarrier(barrierId),
+      onPowerOn: () => this.applyPowerState(),
+      onRoundStart: () => this.audio.roundStart(),
+      onRoundComplete: () => this.audio.roundComplete(),
+      onPerkAcquired: () => this.applyPerkEffects(),
+    };
+
+    this.roundMode = mode;
+  }
+
+  private openBarrier(barrierId: string): void {
+    const city = this.city;
+    if (!city) return;
+    const mesh = city.barrierMeshes.get(barrierId);
+    if (mesh) mesh.visible = false;
+    const handle = city.barrierColliders.get(barrierId);
+    if (handle !== undefined) {
+      this.physics.removeBody(handle);
+      city.barrierColliders.delete(barrierId);
+    }
+    this.audio.barrierOpened();
+  }
+
+  private applyPowerState(): void {
+    this.audio.powerOn();
+    this.city?.setPowered(true);
+  }
+
+  private applyPerkEffects(): void {
+    const perks = this.roundMode?.perks;
+    if (!perks) return;
+
+    const previousMax = this.state.maxHealth;
+    const nextMax = perks.maxHealthFor(BASE_MAX_HEALTH);
+    if (nextMax !== previousMax) {
+      this.state.maxHealth = nextMax;
+      this.state.health = Math.min(nextMax, this.state.health + (nextMax - previousMax));
+    }
+
+    this.state.maxStamina = perks.staminaMax(BASE_MAX_STAMINA);
+    this.player.staminaMaxMultiplier = perks.staminaMax(1);
+    this.player.staminaRegenMultiplier = perks.staminaRegen(1);
+    this.player.staminaDrainMultiplier = perks.staminaDrain(1);
+    this.weapons.reloadTimeMultiplier = perks.reloadTime(1);
+    this.medical.healSpeedMultiplier = perks.healUseTime(1);
+    this.medical.healAmountMultiplier = perks.healAmount(1);
+    this.state.emit();
+  }
+
+  private resetPerkEffects(): void {
+    this.state.maxHealth = BASE_MAX_HEALTH;
+    this.state.maxStamina = BASE_MAX_STAMINA;
+    this.player.staminaMaxMultiplier = 1;
+    this.player.staminaRegenMultiplier = 1;
+    this.player.staminaDrainMultiplier = 1;
+    this.weapons.reloadTimeMultiplier = 1;
+    this.medical.healSpeedMultiplier = 1;
+    this.medical.healAmountMultiplier = 1;
+  }
+
+  private restoreBarriers(): void {
+    const city = this.city;
+    if (!city) return;
+    city.setPowered(false);
+    for (const bar of this.mapConfig.barriers) {
+      const mesh = city.barrierMeshes.get(bar.id);
+      if (mesh) mesh.visible = true;
+      if (city.barrierColliders.has(bar.id)) continue;
+      const base = this.ground.heightAt(bar.x, bar.z);
+      const handle = this.physics.addStaticBox(
+        bar.x,
+        base + bar.height * 0.5,
+        bar.z,
+        bar.width * 0.5,
+        bar.height * 0.5,
+        bar.thickness * 0.5,
+        bar.yaw,
+      );
+      city.barrierColliders.set(bar.id, handle);
+    }
+  }
+
   private findPlayerSpawn(): { x: number; y: number; z: number } {
+    if (this.options.map === 'city') {
+      const s = this.mapConfig.playerSpawn;
+      return { x: s.x, y: this.ground.heightAt(s.x, s.z) + 0.4, z: s.z };
+    }
+
     const clearOf = (
       list: { x: number; z: number; scale?: number }[],
       x: number,
@@ -374,6 +546,7 @@ export class Game {
   }
 
   startNewRun(): void {
+    this.resetPerkEffects();
     this.state.reset();
     if (this.pendingLoadout) {
       this.inventory.applyLoadout(this.pendingLoadout);
@@ -389,8 +562,15 @@ export class Game {
 
     const spawn = this.findPlayerSpawn();
     this.player.respawn(spawn.x, spawn.y, spawn.z);
-    this.player.yaw = Math.random() * Math.PI * 2;
-    this.zombies.populateInitial(DEFAULT_ZOMBIE_OPTIONS.targetActive);
+    if (this.roundMode) {
+      this.player.yaw = this.mapConfig.playerSpawn.yaw;
+      this.restoreBarriers();
+      this.roundMode.reset();
+      this.state.roundMode = true;
+    } else {
+      this.player.yaw = Math.random() * Math.PI * 2;
+      this.zombies.populateInitial(DEFAULT_ZOMBIE_OPTIONS.targetActive);
+    }
 
     this.viewModel.select(this.weapons.current.id);
     this.culler.update(this.player.eye.x, this.player.eye.z, 1, true);
@@ -444,6 +624,7 @@ export class Game {
     this.input.releaseLock();
     this.audio.stopAll();
     this.audio.reset();
+    this.resetPerkEffects();
     this.state.reset();
     this.weapons.reset();
     this.medical.reset();
@@ -456,6 +637,10 @@ export class Game {
     this.weatherFx.reset();
     this.deathAnim = 0;
     this.lastReloading = false;
+    if (this.roundMode) {
+      this.restoreBarriers();
+      this.roundMode.reset();
+    }
     const spawn = this.findPlayerSpawn();
     this.player.respawn(spawn.x, spawn.y, spawn.z);
     this.culler.update(this.player.eye.x, this.player.eye.z, 1, true);
@@ -485,9 +670,14 @@ export class Game {
    */
   private handlePhaseChange(phase: GamePhase): void {
     if (phase === GamePhase.Dead) {
+      const mode = this.roundMode;
+      if (mode) {
+        mode.rounds.gameOver();
+        this.syncRoundHud(mode);
+        this.state.emit();
+      }
       this.input.setEnabled(false);
       this.input.releaseLock();
-      // Fall to one side, chosen once so the collapse is not symmetrical.
       const dir = Math.random() < 0.5 ? -1 : 1;
       this.deathStartElapsed = this.clock.elapsed;
       this.deathRoll = dir * (1.28 + Math.random() * 0.3);
@@ -704,7 +894,7 @@ export class Game {
     forceIntent(partial: Partial<InputIntent>): void;
     forceLook(dx: number, dy: number): void;
     fireOnce(): void;
-    terrain: Terrain;
+    terrain: GroundSurface;
     inventory: Inventory;
     medical: MedicalSystem;
     useMedical(id: MedicalId): boolean;
@@ -714,7 +904,7 @@ export class Game {
       player: this.player,
       zombies: this.zombies,
       weapons: this.weapons,
-      terrain: this.terrain,
+      terrain: this.ground,
       forceIntent: (partial) => {
         this.scriptedIntent = { ...InputSystem.createIntent(), ...partial };
       },
@@ -738,8 +928,85 @@ export class Game {
 
   private scriptedIntent: InputIntent | null = null;
 
+  __round(): {
+    mode: RoundMode | null;
+    setPoints(value: number): void;
+    barrierColliderExists(id: string): boolean;
+    zoneUnlocked(zone: string): boolean;
+    interactablePosition(id: string): { x: number; y: number; z: number } | null;
+    openAllBarriers(): void;
+    spawnPlacements(): { distance: number; facingDot: number }[];
+    barrierDefs(): { id: string; cost: number; x: number; z: number; yaw: number }[];
+    forceOpen(id: string): boolean;
+    perkCount(): number;
+    hasWeapon(id: WeaponId): boolean;
+    reserveFor(id: WeaponId): number;
+    drainReserve(id: WeaponId): void;
+  } {
+    return {
+      mode: this.roundMode,
+      setPoints: (value) => {
+        const mode = this.roundMode;
+        if (!mode) return;
+        mode.economy.points = value;
+        this.syncRoundHud(mode);
+      },
+      barrierColliderExists: (id) => this.city?.barrierColliders.has(id) ?? false,
+      zoneUnlocked: (zone) => this.roundMode?.barriers.isZoneUnlocked(zone) ?? false,
+      interactablePosition: (id) => {
+        const target = this.roundMode?.interactions.find(id);
+        return target ? { x: target.x, y: target.y, z: target.z } : null;
+      },
+      openAllBarriers: () => {
+        const mode = this.roundMode;
+        if (!mode) return;
+        for (const bar of this.mapConfig.barriers) {
+          mode.economy.refund(bar.cost);
+          mode.barriers.purchase(bar.id, mode.economy);
+        }
+      },
+      spawnPlacements: () => (this.roundMode?.director.recentPlacements ?? []).map((p) => ({ ...p })),
+      barrierDefs: () =>
+        this.mapConfig.barriers.map((b) => ({
+          id: b.id,
+          cost: b.cost,
+          x: b.x,
+          z: b.z,
+          yaw: b.yaw,
+        })),
+      forceOpen: (id: string) => {
+        const mode = this.roundMode;
+        if (!mode) return false;
+        const def = this.mapConfig.barriers.find((b) => b.id === id);
+        if (!def) return false;
+        mode.economy.refund(def.cost);
+        return mode.barriers.purchase(id, mode.economy).result === PurchaseResult.Ok;
+      },
+      perkCount: () => this.roundMode?.perks.ownedPerks.size ?? 0,
+      hasWeapon: (id: WeaponId) => this.inventory.hasWeapon(id),
+      reserveFor: (id: WeaponId) => this.inventory.weaponEntry(id)?.reserve ?? -1,
+      drainReserve: (id: WeaponId) => {
+        const entry = this.inventory.weaponEntry(id);
+        if (entry) entry.reserve = 0;
+        this.weapons.drainReserve(id);
+      },
+    };
+  }
+
   get weaponsPublic(): WeaponSystem | null {
     return this.weapons ?? null;
+  }
+
+  get matchStats(): MatchStatsSnapshot | null {
+    return this.roundMode ? this.roundMode.stats.snapshot() : null;
+  }
+
+  get mapId(): MapId {
+    return this.options.map;
+  }
+
+  get cityAssetsLoaded(): number {
+    return this.cityAssetCount;
   }
 
   get rendererInfo(): { type: string; backend: string } {
@@ -801,6 +1068,7 @@ export class Game {
       this.intent.crouch = scripted.crouch;
       this.intent.jumpHeld = scripted.jumpHeld;
       this.intent.aim = scripted.aim;
+      this.intent.interactHeld = scripted.interactHeld;
       if (scripted.jump) {
         this.intent.jump = true;
         scripted.jump = false;
@@ -882,6 +1150,7 @@ export class Game {
   }
 
   private applyAtmosphere(dt: number): void {
+    if (!this.atmosphere) return;
     this.grading.evaluate(this.dayNight, this.weather.current, this.atmosphere.state);
     const g = this.grading.out;
 
@@ -906,7 +1175,9 @@ export class Game {
     }
     this.bundle.renderer.toneMappingExposure = this.exposure;
 
-    computeAmbienceMix(this.dayNight, this.weather, this.ambienceMix);
+    computeAmbienceMix(this.dayNight, this.weather, this.ambienceMix, {
+      urban: this.options.map === 'city',
+    });
 
     if (this.audio.ready) {
       const reloadingNow = this.state.reloading;
@@ -995,13 +1266,63 @@ export class Game {
     this.zombies.step(dt);
     this.profiler.end('ai');
 
+    this.stepRoundMode(dt);
+
     this.noise.step(dt);
+  }
+
+  private stepRoundMode(dt: number): void {
+    const mode = this.roundMode;
+    if (!mode) return;
+
+    const eye = this.player.eye;
+    const outcome = mode.step(
+      dt,
+      eye.x,
+      eye.y,
+      eye.z,
+      this.player.yaw,
+      this.intent.interactHeld,
+    );
+
+    this.state.interactHint = mode.interactHint;
+
+    if (outcome) {
+      if (outcome.result === PurchaseResult.Ok) this.audio.purchaseSuccess();
+      else if (outcome.result === PurchaseResult.Insufficient) this.audio.purchaseDenied();
+      this.state.purchaseMessage = outcome.message;
+      this.state.purchaseMessageLife = 2;
+    }
+
+    if (this.state.purchaseMessageLife > 0) {
+      this.state.purchaseMessageLife = Math.max(0, this.state.purchaseMessageLife - dt);
+      if (this.state.purchaseMessageLife === 0) this.state.purchaseMessage = null;
+    }
+
+    this.syncRoundHud(mode);
+  }
+
+  private syncRoundHud(mode: RoundMode): void {
+    const snap = mode.rounds.snapshot();
+    const s = this.state;
+    s.roundMode = true;
+    s.roundPhase = snap.phase;
+    s.roundNumber = snap.round;
+    s.roundZombiesRemaining = snap.remaining;
+    s.roundCountdown = snap.countdown;
+    s.points = mode.economy.points;
+    s.pointsPopup =
+      mode.economy.lastAwardLife > 0
+        ? { amount: mode.economy.lastAward, life: mode.economy.lastAwardLife / 1.6 }
+        : null;
+    s.powerOn = mode.power.on;
+    s.perks = mode.perks.hudBadges as { id: string; name: string; short: string; color: number }[];
   }
 
   private enforcePlayerBounds(): void {
     const p = this.player.position;
-    const limit = this.terrain.half - 8;
-    const groundY = this.terrain.heightAt(
+    const limit = this.ground.half - 8;
+    const groundY = this.ground.heightAt(
       Math.max(-limit, Math.min(limit, p.x)),
       Math.max(-limit, Math.min(limit, p.z)),
     );
@@ -1011,7 +1332,7 @@ export class Game {
 
     const cx = Math.max(-limit + 2, Math.min(limit - 2, p.x));
     const cz = Math.max(-limit + 2, Math.min(limit - 2, p.z));
-    const safeY = this.terrain.heightAt(cx, cz);
+    const safeY = this.ground.heightAt(cx, cz);
     this.player.body.setPosition(cx, safeY + this.player.body.feetOffset + 0.2, cz);
   }
 
@@ -1139,12 +1460,22 @@ export class Game {
     if (outcome.hitZombie) {
       this.state.registerHit(outcome.kills > 0);
       for (let i = 1; i < outcome.kills; i++) this.state.registerHit(true);
+      this.awardCombatPoints(outcome, false);
       if (outcome.kills === 0 && firstImpact) {
         this.audio.zombieHurt(firstImpact.x, firstImpact.y, firstImpact.z);
       }
     }
 
     this.noise.emit(eye.x, eye.y, eye.z, def.noiseRadius, 1, 'gunshot', 0.7);
+  }
+
+  private awardCombatPoints(outcome: ShotOutcome, melee: boolean): void {
+    const mode = this.roundMode;
+    if (!mode) return;
+    const region = outcome.headshot ? HitRegion.Head : HitRegion.Torso;
+    const kills = Math.max(outcome.kills, outcome.killed ? 1 : 0);
+    mode.registerHit(outcome.damageDealt, region, kills > 0, melee);
+    for (let i = 1; i < kills; i++) mode.registerHit(0, region, true, melee);
   }
 
   private handleMelee(def: WeaponDef): void {
@@ -1170,6 +1501,7 @@ export class Game {
     if (outcome.hitZombie) {
       this.audio.meleeImpact(outcome.endX, outcome.endY, outcome.endZ);
       this.state.registerHit(outcome.kills > 0);
+      this.awardCombatPoints(outcome, true);
       this.noise.emit(
         outcome.endX,
         outcome.endY,

@@ -8,17 +8,31 @@ export interface AmbienceMix {
   ambienceRain: number;
 }
 
+export interface AmbienceContext {
+  urban?: boolean;
+}
+
+export function createAmbienceMix(): AmbienceMix {
+  return {
+    ambienceForest: 0,
+    ambienceNight: 0,
+    ambienceRain: 0,
+  };
+}
+
 export function computeAmbienceMix(
   cycle: DayNightCycle,
   weather: WeatherSystem,
-  out: AmbienceMix = { ambienceForest: 0, ambienceNight: 0, ambienceRain: 0 },
+  out: AmbienceMix = createAmbienceMix(),
+  context: AmbienceContext = {},
 ): AmbienceMix {
   const night = clamp01(cycle.moonlit);
   const rain = weather.rainAmbienceGain;
   const rainDuck = 1 - clamp01(weather.current.rainIntensity) * 0.55;
+  const urban = context.urban === true;
 
   out.ambienceRain = rain;
   out.ambienceNight = night * 0.85 * rainDuck;
-  out.ambienceForest = (1 - night) * 0.7 * rainDuck;
+  out.ambienceForest = urban ? 0 : (1 - night) * 0.7 * rainDuck;
   return out;
 }

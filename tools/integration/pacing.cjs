@@ -23,7 +23,7 @@ app.whenReady().then(async () => {
     },
   });
 
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
   win.focus();
 
   const script = `
@@ -204,5 +204,6 @@ app.whenReady().then(async () => {
 
   console.log('PACING_RESULT ' + JSON.stringify(result));
   const bad = (result.errors || []).length > 0;
+  console.log('VERDICT: ' + (bad ? 'FAIL' : 'PASS'));
   app.exit(bad ? 1 : 0);
 });

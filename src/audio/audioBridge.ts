@@ -134,6 +134,30 @@ export class AudioBridge {
     this.engine.play(SOUND_IDS.healComplete);
   }
 
+  roundStart(): void {
+    this.engine.play(SOUND_IDS.roundStart);
+  }
+
+  roundComplete(): void {
+    this.engine.play(SOUND_IDS.roundComplete);
+  }
+
+  purchaseSuccess(): void {
+    this.engine.play(SOUND_IDS.purchaseSuccess);
+  }
+
+  purchaseDenied(): void {
+    this.engine.play(SOUND_IDS.purchaseDenied);
+  }
+
+  barrierOpened(): void {
+    this.engine.play(SOUND_IDS.barrierOpened);
+  }
+
+  powerOn(): void {
+    this.engine.play(SOUND_IDS.powerOn);
+  }
+
   tickFootsteps(
     dt: number,
     speed: number,

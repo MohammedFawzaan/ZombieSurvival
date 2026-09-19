@@ -37,6 +37,7 @@ export class WeaponSystem {
 
   private cooldown = 0;
   private reloadTimer = 0;
+  reloadTimeMultiplier = 1;
   private reloading = false;
   private triggerHeld = false;
   private switchTimer = 0;
@@ -84,6 +85,29 @@ export class WeaponSystem {
       }
     }
     this.index = 0;
+  }
+
+  drainReserve(id: WeaponId): void {
+    const slot = this.slots.find((s) => s.def.id === id);
+    if (!slot) return;
+    slot.reserve = 0;
+    this.syncState();
+  }
+
+  rebuildSlots(): void {
+    if (!this.inventory) return;
+    const heldId = this.slots[this.index]?.def.id ?? null;
+    for (const slot of this.slots) {
+      const entry = this.inventory.weaponEntry(slot.def.id);
+      if (entry) {
+        entry.magazine = slot.magazine;
+        entry.reserve = slot.reserve;
+      }
+    }
+    this.buildSlots();
+    const restored = this.slots.findIndex((s) => s.def.id === heldId);
+    this.index = restored >= 0 ? restored : 0;
+    this.syncState();
   }
 
   get slotCount(): number {
@@ -205,7 +229,7 @@ export class WeaponSystem {
     if (this.reloading || this.switchTimer > 0 || this.meleeBusy) return false;
     if (slot.magazine >= slot.def.magazineSize || slot.reserve <= 0) return false;
     this.reloading = true;
-    this.reloadTimer = slot.def.reloadTime;
+    this.reloadTimer = slot.def.reloadTime * this.reloadTimeMultiplier;
     this.syncState();
     return true;
   }
@@ -382,7 +406,7 @@ export class WeaponSystem {
 
   get reloadProgress(): number {
     if (!this.reloading) return 0;
-    return 1 - clamp(this.reloadTimer / this.current.reloadTime, 0, 1);
+    return 1 - clamp(this.reloadTimer / (this.current.reloadTime * this.reloadTimeMultiplier), 0, 1);
   }
 
   private syncState(): void {

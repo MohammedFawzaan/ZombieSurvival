@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import type { HudSnapshot } from '../state/types';
+import { RoundPhase, type HudSnapshot } from '../state/types';
 import { clamp } from '../util/math';
 
 interface DamageDirectionsProps {
@@ -130,6 +130,62 @@ interface HudProps {
   reloadProgress: number;
 }
 
+const RoundHud = memo(function RoundHud({ snap }: { snap: HudSnapshot }) {
+  const phase = snap.roundPhase;
+  const banner =
+    phase === RoundPhase.RoundComplete
+      ? `Round ${snap.roundNumber} complete`
+      : phase === RoundPhase.Intermission
+        ? `Round ${(snap.roundNumber ?? 0) + 1} incoming`
+        : phase === RoundPhase.RoundStarting
+          ? `Round ${snap.roundNumber}`
+          : null;
+
+  return (
+    <>
+      {banner && (
+        <div className="round-banner">
+          <div className="round-banner__label">
+            {phase === RoundPhase.RoundComplete ? 'Cleared' : 'Brace'}
+          </div>
+          <div className="round-banner__round">{banner}</div>
+        </div>
+      )}
+
+      <div className="round-hud">
+        <div className="round-hud__round">Round {snap.roundNumber}</div>
+        {phase === RoundPhase.Active && (
+          <div className="round-hud__remaining">{snap.roundZombiesRemaining} left</div>
+        )}
+        <div className="round-hud__points">{snap.points} pts</div>
+        {snap.pointsPopup && (
+          <div
+            className="round-hud__popup"
+            style={{ opacity: clamp(snap.pointsPopup.life, 0, 1) }}
+          >
+            +{snap.pointsPopup.amount}
+          </div>
+        )}
+        {snap.powerOn && <div className="round-hud__power">Power on</div>}
+        {snap.perks && snap.perks.length > 0 && (
+          <div className="perk-row">
+            {snap.perks.map((p) => (
+              <span
+                key={p.id}
+                className="perk-badge"
+                title={p.name}
+                style={{ background: `#${p.color.toString(16).padStart(6, '0')}` }}
+              >
+                {p.short}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+});
+
 export const Hud = memo(function Hud({ snap, spreadPx, reloadProgress }: HudProps) {
   const magClass =
     snap.magazine === 0 ? 'is-empty' : snap.magazine <= snap.magazineSize * 0.25 ? 'is-low' : '';
@@ -143,6 +199,10 @@ export const Hud = memo(function Hud({ snap, spreadPx, reloadProgress }: HudProp
         className="damage-vignette"
         style={{ opacity: clamp(snap.damageFlash, 0, 1) * 0.92 }}
       />
+
+      {snap.roundMode && <RoundHud snap={snap} />}
+      {snap.interactHint && <div className="interact-prompt">{snap.interactHint}</div>}
+      {snap.purchaseMessage && <div className="purchase-toast">{snap.purchaseMessage}</div>}
 
       <div className="hud">
         <div className="hud__stats">

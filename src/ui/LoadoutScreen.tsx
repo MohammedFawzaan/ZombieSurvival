@@ -1,4 +1,5 @@
 import { memo, useMemo, useState } from 'react';
+import type { MatchStatsSnapshot } from '../rounds/matchStats';
 import { WEAPONS } from '../weapons/definitions';
 import { MEDICAL, MEDICAL_ORDER } from '../medical/definitions';
 import {
@@ -332,11 +333,13 @@ export const LoadoutScreen = memo(function LoadoutScreen({
 export const ResultsScreen = memo(function ResultsScreen({
   kills,
   survivedSeconds,
+  stats,
   onRestart,
   onMenu,
 }: {
   kills: number;
   survivedSeconds: number;
+  stats?: MatchStatsSnapshot | null;
   onRestart: () => void;
   onMenu: () => void;
 }) {
@@ -346,9 +349,20 @@ export const ResultsScreen = memo(function ResultsScreen({
     <div className="screen screen--died overlay--interactive">
       <div className="died">
         <h1 className="died__title">You Died</h1>
-        <p className="died__tagline">The forest keeps what it takes</p>
+        <p className="died__tagline">
+          {stats ? 'The district keeps what it takes' : 'The forest keeps what it takes'}
+        </p>
 
         <div className="died__stats">
+          {stats && (
+            <>
+              <div className="died-stat">
+                <span className="died-stat__value">{stats.highestRound}</span>
+                <span className="died-stat__label">Rounds</span>
+              </div>
+              <span className="died__sep" />
+            </>
+          )}
           <div className="died-stat">
             <span className="died-stat__value">{kills}</span>
             <span className="died-stat__label">Killed</span>
@@ -361,6 +375,20 @@ export const ResultsScreen = memo(function ResultsScreen({
             <span className="died-stat__label">Survived</span>
           </div>
         </div>
+
+        {stats && (
+          <div className="died__detail">
+            <span>Headshots<b>{stats.headshots}</b></span>
+            <span>Accuracy<b>{Math.round(stats.accuracy * 100)}%</b></span>
+            <span>Damage<b>{stats.damageDealt}</b></span>
+            <span>Points earned<b>{stats.pointsEarned}</b></span>
+            <span>Points spent<b>{stats.pointsSpent}</b></span>
+            <span>Doors opened<b>{stats.doorsOpened}</b></span>
+            <span>Perks<b>{stats.perksBought}</b></span>
+            <span>Weapons bought<b>{stats.weaponsBought}</b></span>
+            <span>Power<b>{stats.powerActivated ? 'On' : 'Off'}</b></span>
+          </div>
+        )}
 
         <div className="died__actions">
           <button className="btn btn--danger" onClick={onRestart} autoFocus>

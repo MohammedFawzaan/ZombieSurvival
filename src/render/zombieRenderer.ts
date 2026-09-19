@@ -6,10 +6,12 @@ import { buildZombieRig, createZombieMaterials, type HumanoidParts } from './zom
 import type { ZombieAssetSet, ZombieClipName } from './zombieAssets';
 import { clamp, damp, lerp } from '../util/math';
 
-const VISUAL_POOL = 32;
+const VISUAL_POOL = 84;
 
-const VISIBLE_DISTANCE = 200;
-const VISIBLE_DISTANCE_HIDE = 210;
+const VISIBLE_DISTANCE = 150;
+const VISIBLE_DISTANCE_HIDE = 162;
+const ANIM_FULL_DISTANCE = 30;
+const ANIM_HALF_DISTANCE = 62;
 
 interface RigSlot {
   parts: HumanoidParts;
@@ -41,6 +43,7 @@ interface SkinnedSlot {
   deathProgress: number;
   attackProgress: number;
   staggerProgress: number;
+  animAccum: number;
 }
 
 const CLIP_LIST: ZombieClipName[] = ['idle', 'walk', 'chase', 'attack', 'stagger', 'hit', 'death'];
@@ -193,6 +196,7 @@ export class ZombieRenderer {
         deathProgress: 0,
         attackProgress: 0,
         staggerProgress: 0,
+        animAccum: 0,
       });
     }
   }
@@ -240,6 +244,7 @@ export class ZombieRenderer {
       slot.deathProgress = 0;
       slot.attackProgress = 0;
       slot.staggerProgress = 0;
+      slot.animAccum = 0;
       slot.weights.clear();
       this.bindKind(slot, z.kind);
       slot.root.visible = true;
@@ -418,7 +423,19 @@ export class ZombieRenderer {
     if (walkAction) walkAction.setEffectiveTimeScale(strideRate);
     if (chaseAction) chaseAction.setEffectiveTimeScale(strideRate);
 
-    if (slot.mixer) slot.mixer.update(dt);
+    if (slot.mixer) {
+      const d = z.distToPlayer;
+      if (d <= ANIM_FULL_DISTANCE) {
+        slot.mixer.update(dt);
+      } else {
+        const stride = d <= ANIM_HALF_DISTANCE ? 2 : 4;
+        slot.animAccum += dt;
+        if (slot.animAccum * 60 >= stride) {
+          slot.mixer.update(slot.animAccum);
+          slot.animAccum = 0;
+        }
+      }
+    }
 
     this.applyFlashSkinned(slot, z.hitFlash);
   }

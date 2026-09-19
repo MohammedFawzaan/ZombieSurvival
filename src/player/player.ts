@@ -53,6 +53,10 @@ export class Player {
 
   private coyote = 0;
   private jumpBuffer = 0;
+  staminaMaxMultiplier = 1;
+  staminaRegenMultiplier = 1;
+  staminaDrainMultiplier = 1;
+
   private staminaIdle = 0;
   private bobPhase = 0;
   private bobAmount = 0;
@@ -217,8 +221,9 @@ export class Player {
     this.sprinting = input.sprint && canSprint;
     this.aiming = input.aim && !this.sprinting;
 
+    const staminaMax = t.staminaMax * this.staminaMaxMultiplier;
     if (this.sprinting && grounded) {
-      this.state.stamina -= t.staminaSprintDrain * dt;
+      this.state.stamina -= t.staminaSprintDrain * this.staminaDrainMultiplier * dt;
       this.staminaIdle = 0;
       if (this.state.stamina <= 0) {
         this.state.stamina = 0;
@@ -227,7 +232,10 @@ export class Player {
     } else {
       this.staminaIdle += dt;
       if (this.staminaIdle >= t.staminaRegenDelay) {
-        this.state.stamina = Math.min(t.staminaMax, this.state.stamina + t.staminaRegen * dt);
+        this.state.stamina = Math.min(
+          staminaMax,
+          this.state.stamina + t.staminaRegen * this.staminaRegenMultiplier * dt,
+        );
       }
     }
     if (this.state.exhausted && this.state.stamina >= t.staminaExhaustRecover) {

@@ -19,7 +19,7 @@ app.whenReady().then(async () => {
   win.webContents.on('console-message', (_e, level, m) => { if (level === 3) errors.push(m); });
   let shown = false;
   win.once('ready-to-show', () => { win.show(); shown = true; });
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
 
   const r = await win.webContents.executeJavaScript(`(async () => {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));

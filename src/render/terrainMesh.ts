@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Terrain } from '../world/terrain';
+import type { GroundSurface } from '../maps/groundSurface';
 import { clamp } from '../util/math';
 import { Noise2D } from '../util/noise';
 
@@ -8,7 +8,38 @@ export interface TerrainMeshResult {
   material: THREE.MeshStandardMaterial;
 }
 
-export function buildTerrainMesh(terrain: Terrain, anisotropy: number): TerrainMeshResult {
+export interface TerrainPalette {
+  grass: number;
+  grassDry: number;
+  dirt: number;
+  rock: number;
+  road: number;
+  detailRepeat: number;
+}
+
+export const FOREST_PALETTE: TerrainPalette = {
+  grass: 0x63753f,
+  grassDry: 0x87834a,
+  dirt: 0x776045,
+  rock: 0x8a8a84,
+  road: 0x6e6153,
+  detailRepeat: 1,
+};
+
+export const URBAN_PALETTE: TerrainPalette = {
+  grass: 0x5b6440,
+  grassDry: 0x6f6a4c,
+  dirt: 0x6a5c49,
+  rock: 0x6d6a64,
+  road: 0x5a5148,
+  detailRepeat: 0.42,
+};
+
+export function buildTerrainMesh(
+  terrain: GroundSurface,
+  anisotropy: number,
+  palette: TerrainPalette = FOREST_PALETTE,
+): TerrainMeshResult {
   const { config, gridSize, cellSize } = terrain;
   const half = terrain.half;
   const vertexCount = gridSize * gridSize;
@@ -21,11 +52,11 @@ export function buildTerrainMesh(terrain: Terrain, anisotropy: number): TerrainM
   const detail = new Noise2D(config.seed ^ 0x5bf03635);
   const n = { x: 0, y: 1, z: 0 };
 
-  const grass = new THREE.Color(0x63753f);
-  const grassDry = new THREE.Color(0x87834a);
-  const dirt = new THREE.Color(0x776045);
-  const rock = new THREE.Color(0x8a8a84);
-  const roadCol = new THREE.Color(0x6e6153);
+  const grass = new THREE.Color(palette.grass);
+  const grassDry = new THREE.Color(palette.grassDry);
+  const dirt = new THREE.Color(palette.dirt);
+  const rock = new THREE.Color(palette.rock);
+  const roadCol = new THREE.Color(palette.road);
   const tmp = new THREE.Color();
 
   for (let j = 0; j < gridSize; j++) {
@@ -51,8 +82,11 @@ export function buildTerrainMesh(terrain: Terrain, anisotropy: number): TerrainM
       const rockiness = clamp((slope - 0.42) / 0.5, 0, 1);
       const dryness = clamp(detail.fbm(x * 0.013, z * 0.013, 3) * 0.5 + 0.5, 0, 1);
       const heightFactor = clamp((y - 2) / 22, 0, 1);
-      const roadDist = terrain.distanceToRoad(x, z);
-      const onRoad = 1 - clamp((roadDist - terrain.road.halfWidth) / 3.4, 0, 1);
+      const road = terrain.road;
+      const onRoad =
+        road && terrain.distanceToRoad
+          ? 1 - clamp((terrain.distanceToRoad(x, z) - road.halfWidth) / 3.4, 0, 1)
+          : 0;
 
       tmp.copy(grass).lerp(grassDry, dryness * 0.75);
       tmp.lerp(dirt, clamp(rockiness * 0.7 + heightFactor * 0.12, 0, 1) * 0.7);
@@ -101,9 +135,9 @@ export function buildTerrainMesh(terrain: Terrain, anisotropy: number): TerrainM
     dithering: true,
   });
 
-  const detailTex = makeDetailTexture(anisotropy);
+  const detailTex = makeDetailTexture(anisotropy, palette.detailRepeat);
   material.roughnessMap = detailTex;
-  material.normalMap = makeDetailNormal(anisotropy);
+  material.normalMap = makeDetailNormal(anisotropy, palette.detailRepeat);
   material.normalScale.set(0.55, 0.55);
 
   const mesh = new THREE.Mesh(geom, material);
@@ -116,7 +150,7 @@ export function buildTerrainMesh(terrain: Terrain, anisotropy: number): TerrainM
   return { mesh, material };
 }
 
-function makeDetailTexture(anisotropy: number): THREE.DataTexture {
+function makeDetailTexture(anisotropy: number, repeatScale = 1): THREE.DataTexture {
   const size = 128;
   const data = new Uint8Array(size * size * 4);
   const noise = new Noise2D(9182);
@@ -134,13 +168,13 @@ function makeDetailTexture(anisotropy: number): THREE.DataTexture {
   const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(60, 60);
+  tex.repeat.set(60 * repeatScale, 60 * repeatScale);
   tex.anisotropy = anisotropy;
   tex.needsUpdate = true;
   return tex;
 }
 
-function makeDetailNormal(anisotropy: number): THREE.DataTexture {
+function makeDetailNormal(anisotropy: number, repeatScale = 1): THREE.DataTexture {
   const size = 128;
   const data = new Uint8Array(size * size * 4);
   const noise = new Noise2D(5521);
@@ -165,7 +199,7 @@ function makeDetailNormal(anisotropy: number): THREE.DataTexture {
   const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(90, 90);
+  tex.repeat.set(90 * repeatScale, 90 * repeatScale);
   tex.anisotropy = anisotropy;
   tex.needsUpdate = true;
   return tex;

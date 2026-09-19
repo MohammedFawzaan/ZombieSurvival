@@ -1,53 +1,33 @@
-import { app, BrowserWindow, ipcMain, protocol, shell, net } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 
-const isDev = process.env.NODE_ENV === 'development';
 const DEV_URL = 'http://localhost:5273';
-const APP_SCHEME = 'app';
 
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: APP_SCHEME,
-    privileges: {
-      standard: true,
-      secure: true,
-      supportFetchAPI: true,
-      corsEnabled: true,
-      stream: true,
-    },
-  },
-]);
+if (!app) {
+  console.error(
+    [
+      '',
+      'Zombie Survival cannot start: the Electron APIs are unavailable.',
+      '',
+      'ELECTRON_RUN_AS_NODE is set in this environment, which makes the',
+      'electron binary run as plain Node.js. The app then has no window and',
+      'exits immediately.',
+      '',
+      'Fix it in the shell you launch from:',
+      '  PowerShell:  Remove-Item Env:ELECTRON_RUN_AS_NODE',
+      '  cmd.exe:     set ELECTRON_RUN_AS_NODE=',
+      '  bash:        unset ELECTRON_RUN_AS_NODE',
+      '',
+    ].join('\n'),
+  );
+  process.exit(1);
+}
 
-app.commandLine.appendSwitch('enable-unsafe-webgpu');
-app.commandLine.appendSwitch('enable-features', 'Vulkan,WebGPU,UseSkiaRenderer');
 app.commandLine.appendSwitch('use-angle', 'default');
-
-// Present in step with the display. Uncapping the frame rate lets frames be
-// presented mid-refresh, which tears and judders and reads as laggy mouse
-// look even when the FPS counter is high. Vsync keeps delivery even.
-app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('enable-zero-copy');
-
-// Raw, unaccelerated pointer deltas for pointer lock, so mouse look is not
-// reshaped by the OS pointer-acceleration curve.
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
 app.commandLine.appendSwitch('enable-blink-features', 'PointerLockOptions');
 
 app.disableDomainBlockingFor3DAPIs();
-
-function registerAppProtocol(): void {
-  const distRoot = path.join(__dirname, '../dist');
-  protocol.handle(APP_SCHEME, (request) => {
-    const url = new URL(request.url);
-    let filePath = decodeURIComponent(url.pathname);
-    if (filePath === '' || filePath === '/') filePath = '/index.html';
-    const resolved = path.normalize(path.join(distRoot, filePath));
-    if (!resolved.startsWith(distRoot)) {
-      return new Response('Forbidden', { status: 403 });
-    }
-    return net.fetch(pathToFileURL(resolved).toString());
-  });
-}
 
 let win: BrowserWindow | null = null;
 
@@ -74,7 +54,26 @@ function createWindow(): void {
   win.removeMenu();
   win.once('ready-to-show', () => {
     win?.show();
-    if (isDev) win?.webContents.openDevTools({ mode: 'detach' });
+    win?.webContents.openDevTools({ mode: 'detach' });
+  });
+
+  win.webContents.once('did-finish-load', () => {
+    if (win && !win.isVisible()) win.show();
+  });
+
+  win.webContents.on('did-fail-load', (_event, code, description, url) => {
+    console.error(`renderer failed to load (${code} ${description}): ${url}`);
+    win?.show();
+  });
+
+  win.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`renderer process gone: ${details.reason} (exitCode ${details.exitCode})`);
+    if (win && !win.isDestroyed()) win.reload();
+  });
+
+  win.on('unresponsive', () => {
+    console.error('renderer became unresponsive; reloading');
+    if (win && !win.isDestroyed()) win.reload();
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -82,11 +81,7 @@ function createWindow(): void {
     return { action: 'deny' };
   });
 
-  if (isDev) {
-    void win.loadURL(DEV_URL);
-  } else {
-    void win.loadURL(`${APP_SCHEME}://index.html`);
-  }
+  void win.loadURL(DEV_URL);
 
   win.on('closed', () => {
     win = null;
@@ -108,7 +103,6 @@ ipcMain.handle('app:getInfo', () => ({
 }));
 
 app.whenReady().then(() => {
-  if (!isDev) registerAppProtocol();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

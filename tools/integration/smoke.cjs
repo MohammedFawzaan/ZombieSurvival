@@ -50,7 +50,7 @@ app.whenReady().then(async () => {
     record('error', `preload ${p}: ${err.message}`);
   });
 
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
 
   const script = `
   (async () => {

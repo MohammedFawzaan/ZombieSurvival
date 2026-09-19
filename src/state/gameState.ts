@@ -1,6 +1,7 @@
 import {
   GamePhase,
   MeleePhase,
+  RoundPhase,
   type AmmoType,
   type HudSnapshot,
   type MedicalSnapshot,
@@ -68,8 +69,18 @@ export class GameState {
   sprinting = false;
   crouching = false;
   interactHint: string | null = null;
+  purchaseMessage: string | null = null;
+  purchaseMessageLife = 0;
+  roundMode = false;
+  roundPhase: RoundPhase = RoundPhase.Ready;
+  roundNumber = 0;
+  roundZombiesRemaining = 0;
+  roundCountdown = 0;
+  points = 0;
+  pointsPopup: { amount: number; life: number } | null = null;
+  powerOn = false;
+  perks: { id: string; name: string; short: string; color: number }[] = [];
   readonly damageDirs: DamageDirection[] = [];
-  /** Current view yaw, so damage arrows can be drawn relative to facing. */
   playerYaw = 0;
 
   private listeners = new Set<(s: HudSnapshot) => void>();
@@ -144,6 +155,16 @@ export class GameState {
     this.hitMarker = 0;
     this.killMarker = 0;
     this.interactHint = null;
+    this.purchaseMessage = null;
+    this.purchaseMessageLife = 0;
+    this.roundPhase = RoundPhase.Ready;
+    this.roundNumber = 0;
+    this.roundZombiesRemaining = 0;
+    this.roundCountdown = 0;
+    this.points = 0;
+    this.pointsPopup = null;
+    this.powerOn = false;
+    this.perks = [];
     this.emit();
   }
 
@@ -218,11 +239,17 @@ export class GameState {
       killMarker: this.killMarker,
       lowHealth: this.health <= this.maxHealth * 0.35,
       interactHint: this.interactHint,
-      // Rotate into view space so the HUD can place each arrow around the
-      // crosshair: 0 is straight ahead, positive is to the right.
+      purchaseMessage: this.purchaseMessage,
+      roundMode: this.roundMode,
+      roundPhase: this.roundPhase,
+      roundNumber: this.roundNumber,
+      roundZombiesRemaining: this.roundZombiesRemaining,
+      roundCountdown: this.roundCountdown,
+      points: this.points,
+      pointsPopup: this.pointsPopup,
+      powerOn: this.powerOn,
+      perks: this.perks,
       damageDirs: this.damageDirs.map((d) => ({
-        // The camera's forward is (-sin yaw, -cos yaw), which makes the
-        // matching basis for atan2(dx, -dz) equal to -yaw, not +yaw.
         angle: angleDiff(d.angle, -this.playerYaw),
         strength: d.strength,
         life: d.life / DAMAGE_DIR_LIFE,

@@ -14,7 +14,7 @@ app.whenReady().then(async () => {
       backgroundThrottling: false,
     },
   });
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
   win.show(); win.focus();
 
   const script = `

@@ -30,7 +30,7 @@ app.whenReady().then(async () => {
     logs.push(`[${level === 3 ? 'error' : level === 2 ? 'warn' : 'log'}] ${message}`);
   });
 
-  await win.loadFile(path.join(root, 'dist/index.html'));
+  await win.loadFile(path.join(root, 'dist/index.html'), { query: { map: 'forest' } });
   win.show();
   win.moveTop();
   win.focus();

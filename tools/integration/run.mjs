@@ -26,10 +26,16 @@ const SUITES = {
   atmosphere: 'atmosphere.cjs',
   skycheck: 'skycheck.cjs',
   prodlaunch: 'prodlaunch.cjs',
+  city: 'city.cjs',
+  purchases: 'purchases.cjs',
+  rounds: 'rounds.cjs',
+  cityshots: 'cityshots.cjs',
+  barriers: 'barriers.cjs',
+  density: 'density.cjs',
 };
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith('-'));
-const names = requested.length > 0 ? requested : Object.keys(SUITES).filter((n) => n !== 'screenshots' && n !== 'zombieshots' && n !== 'uishot');
+const names = requested.length > 0 ? requested : Object.keys(SUITES).filter((n) => n !== 'screenshots' && n !== 'zombieshots' && n !== 'uishot' && n !== 'cityshots' && n !== 'density');
 
 if (!existsSync(path.join(root, 'dist', 'index.html'))) {
   console.error('dist/index.html is missing. Run "npm run build" first.');
